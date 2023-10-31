@@ -74,7 +74,7 @@ def main(
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
     tokenizer = AutoTokenizer.from_pretrained(model_url)
     print('loading model')
-    model = LLM(model_url, quantization="awq", dtype="half", gpu_memory_utilization=0.90, swap_space=16, max_model_len=4096, max_num_batched_tokens=8192)
+    model = LLM(model_url, quantization="awq", dtype="half", gpu_memory_utilization=0.90, swap_space=16, max_model_len=4096, )
     print('model loaded')
     
     output_data = []
@@ -101,10 +101,9 @@ def main(
         outputs = model.generate(chat_templates, sampling_params)
 
         # Print the outputs.
-        for output in outputs:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(generated_text)
+        prompt = outputs[0].prompt
+        generated_text = output.outputs[0].text
+        print(generated_text)
 
         for output, prompt in zip(outputs, prompts):
             output_data.append(
