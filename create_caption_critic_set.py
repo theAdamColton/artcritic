@@ -100,11 +100,6 @@ def main(
 
         outputs = model.generate(chat_templates, sampling_params)
 
-        # Print the outputs.
-        prompt = outputs[0].prompt
-        generated_text = output.outputs[0].text
-        print(generated_text)
-
         for output, prompt in zip(outputs, prompts):
             output_data.append(
                     dict(
