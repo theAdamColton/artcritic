@@ -14,7 +14,7 @@ import torch.utils.checkpoint as checkpoint
 import wandb
 import contextlib
 import torchvision
-from transformers import CLIPModel, CLIPProcessor
+from transformers import CLIPModel, CLIPProcessor, DataCollatorForSeq2Seq
 from diffusers.models.attention_processor import LoRAAttnProcessor
 from diffusers.loaders import AttnProcsLayers
 from diffusers import StableDiffusionPipeline, DDIMScheduler, UNet2DConditionModel
@@ -131,18 +131,21 @@ def llava_loss_fn(inference_dtype=torch.float16, device='cuda', accelerator=None
                 for c in convs
         ]
 
-        model_inputs = llava_preprocess(sources, tokenizer, has_image=True)
+        # preprocesses using the llava_preprocesser
+        # the llava_preprocesser adds image token markers 
+        all_input_ids = []
+        all_targets = []
+        for source in sources:
+            out_dict = llava_preprocess([source], tokenizer, has_image=True)
+            all_input_ids.append(out_dict['input_ids'][0])
+            all_targets.append(out_dict['labels'][0])
 
+        # pads
+        collator = DataCollatorForSeq2Seq(tokenizer, model=None, pad_to_multiple_of=64)
+        features = [{"labels":target, "input_ids": input_ids} for input_ids, target in zip(all_input_ids, all_targets)]
+        model_inputs = collator(features, return_tensors="pt")
 
-        input_ids = model_inputs['input_ids'].to(device)
-        labels = model_inputs['labels'].to(device)
-
-        # clips input_ids to a shorter length
-        max_len = 96
-        input_ids = input_ids[:, :max_len]
-        labels = labels[:, :max_len]
-
-        outputs = model(input_ids, labels=labels, images=pixel_values, return_dict=True)
+        outputs = model(images=pixel_values, return_dict=True, **model_inputs)
 
         return outputs.loss, -outputs.loss
 
