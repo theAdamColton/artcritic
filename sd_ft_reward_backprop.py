@@ -403,12 +403,12 @@ def main(_):
         eps=config.train.adam_epsilon,
     )
 
-    prompt_fn = getattr(prompts_file, config.prompt_fn)
+    prompt_fn = getattr(prompts_file, config.prompt_fn)()
 
     if config.eval_prompt_fn == '':
-        eval_prompt_fn = prompt_fn
+        eval_prompt_fn = getattr(prompts_file, config.prompt_fn)()
     else:
-        eval_prompt_fn = getattr(prompts_file, config.eval_prompt_fn)
+        eval_prompt_fn = getattr(prompts_file, config.eval_prompt_fn)()
 
     # generate negative prompt embeddings
     neg_prompt_embed = pipeline.text_encoder(

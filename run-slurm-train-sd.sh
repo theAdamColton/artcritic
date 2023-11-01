@@ -8,7 +8,7 @@
 #SBATCH --mem=40GB
 #SBATCH --mail-user=u1377031@utah.edu
 #SBATCH --mail-type=FAIL,END
-#SBATCH -o assignment_1-%j
+#SBATCH -o train_sd-%j
 
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -25,4 +25,4 @@ export HF_HOME=${CACHE_DIR}
 OUT_DIR=./out/
 mkdir -p ${OUT_DIR}
 
-CUDA_VISIBLE_DEVICES=0 accelerate launch sd_ft_reward_backprop.py --config config/align_prop.py:llava
+CUDA_VISIBLE_DEVICES=0 accelerate launch --config_file accelerate_config.yaml sd_ft_reward_backprop.py --config config/align_prop.py:llava
