@@ -144,6 +144,8 @@ def llava_loss_fn(inference_dtype=torch.float16, device='cuda', accelerator=None
         features = [{"labels":target, "input_ids": input_ids} for input_ids, target in zip(all_input_ids, all_targets)]
         model_inputs = collator(features, return_tensors="pt")
 
+        model_inputs = {k:v.to(device) for k,v in model_inputs.items()}
+
         outputs = model(images=pixel_values, return_dict=True, **model_inputs)
 
         return outputs.loss, -outputs.loss
