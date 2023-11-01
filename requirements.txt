@@ -4,3 +4,7 @@ tqdm==4.66.1
 transformers==4.34.1
 vllm==0.2.1.post1
 llava @ git+https://github.com/haotian-liu/LLaVA/
+diffusers[torch]==0.17.1
+wandb
+ml-collections
+inflect==6.0.4

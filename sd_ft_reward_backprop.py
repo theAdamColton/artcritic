@@ -23,7 +23,6 @@ from accelerate.logging import get_logger
 from accelerate import Accelerator
 from absl import app, flags
 from ml_collections import config_flags
-import torch.nn.functional as F
 import torchvision.transforms.functional
 
 import prompts as prompts_file
