@@ -71,6 +71,7 @@ def general():
     config.grad_scale = 1
     config.sd_guidance_scale = 7.5
     config.steps = 50 
+    config.lora_rank = 4
 
     ###### Pretrained Model ######
     config.pretrained = pretrained = ml_collections.ConfigDict()
@@ -141,7 +142,10 @@ def llava():
     config.train.loss_coeff = 0.01
     config.train.learning_rate = 1e-3
     config.train.adam_weight_decay = 0.1
-    config.train.gradient_accumulation_steps = 4
+    config.train.gradient_accumulation_steps = 2
+
+    config.lora_rank = 1
+    config.train.use_8bit_adam = True
 
     config.steps = 20 
     config.trunc_backprop_timestep = 15

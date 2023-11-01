@@ -72,9 +72,9 @@ def llava_loss_fn(inference_dtype=torch.float16, device='cuda', accelerator=None
 
     print("LOADING LLAVA MODEL")
     tokenizer, model, image_processor, context_len = llava_load_pretrained_model(model_path, model_base=None, model_name=model_name, load_4bit=True, device=device)
-    model = model.requires_grad_(False)
     if accelerator is not None:
         model = accelerator.prepare(model)
+    model = model.requires_grad_(False)
 
     # needs to monkey patch the vision tower so it doesn't have the @no_grad decorator
     model.model.vision_tower.forward = lambda images: forward_patch(model.model.vision_tower, images)
@@ -120,16 +120,13 @@ def llava_loss_fn(inference_dtype=torch.float16, device='cuda', accelerator=None
             conv_instance.append_message(conv.roles[1], captioning_response)
             convs.append(conv_instance)
 
-
         pixel_values = process_image_pixels(pixel_values)
 
-
         # wierd hack to get the llava_preprocesser to accept the conversations
-
         sources = [
                 [ 
                  {'from': "human" if role == "USER" else "gpt",
-                  'value': value,}
+                  'value': value.strip().replace("\"", ""),}
                  for role, value in c.messages
                 ]
                 for c in convs
@@ -137,8 +134,14 @@ def llava_loss_fn(inference_dtype=torch.float16, device='cuda', accelerator=None
 
         model_inputs = llava_preprocess(sources, tokenizer, has_image=True)
 
+
         input_ids = model_inputs['input_ids'].to(device)
         labels = model_inputs['labels'].to(device)
+
+        # clips input_ids to a shorter length
+        max_len = 96
+        input_ids = input_ids[:, :max_len]
+        labels = labels[:, :max_len]
 
         outputs = model(input_ids, labels=labels, images=pixel_values, return_dict=True)
 
@@ -316,7 +319,7 @@ def main(_):
             block_id = int(name[len("down_blocks.")])
             hidden_size = pipeline.unet.config.block_out_channels[block_id]
 
-        lora_attn_procs[name] = LoRAAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim)
+        lora_attn_procs[name] = LoRAAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, rank=config.lora_rank)
     pipeline.unet.set_attn_processor(lora_attn_procs)
 
     # this is a hack to synchronize gradients properly. the module that registers the parameters we care about (in
@@ -567,6 +570,8 @@ def main(_):
                             loss =  loss.sum()
                             loss = loss/config.train.batch_size_per_gpu_available
                             loss = loss * config.train.loss_coeff
+
+                            logger.info(f"loss {loss.item():.4f}")
 
                             rewards_mean = rewards.mean()
                             rewards_std = rewards.std()
