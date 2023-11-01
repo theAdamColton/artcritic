@@ -71,9 +71,8 @@ def llava_loss_fn(inference_dtype=torch.float16, device='cuda', accelerator=None
 
     print("LOADING LLAVA MODEL")
     tokenizer, model, image_processor, context_len = llava_load_pretrained_model(model_path, model_base=None, model_name=model_name, load_4bit=True, device=device)
-    if accelerator is not None:
-        model = accelerator.prepare(model)
     model = model.requires_grad_(False)
+    model.gradient_checkpointing_enable()
 
     # needs to monkey patch the vision tower so it doesn't have the @no_grad decorator
     model.model.vision_tower.forward = lambda images: forward_patch(model.model.vision_tower, images)

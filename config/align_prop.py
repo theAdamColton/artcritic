@@ -152,7 +152,7 @@ def llava():
     config.truncated_backprop = True
     config.truncated_backprop_rand = True
     config.truncated_backprop_minmax = (0,20)    
-    config = set_config_batch(config, total_samples_per_epoch=256,total_batch_size= 128, per_gpu_capacity=1)
+    config = set_config_batch(config, total_samples_per_epoch=256,total_batch_size= 128, per_gpu_capacity=4)
     return config
 
 
@@ -176,7 +176,7 @@ def hps():
     config.truncated_backprop = True
     config.truncated_backprop_rand = True
     config.truncated_backprop_minmax = (0,50)    
-    config = set_config_batch(config, total_samples_per_epoch=256,total_batch_size= 128, per_gpu_capacity=4)
+    config = set_config_batch(config, total_samples_per_epoch=256,total_batch_size= 128, per_gpu_capacity=2)
     return config
 
 
