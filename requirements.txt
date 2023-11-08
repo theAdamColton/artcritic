@@ -1,9 +1,15 @@
-datasets
-jsonargparse
-tqdm
-transformers
-llava @ git+https://github.com/haotian-liu/LLaVA/
-diffusers[torch]==0.17.1
-wandb
-ml-collections
-inflect==6.0.4
+absl_py==2.0.0
+accelerate==0.24.1
+datasets==2.14.6
+diffusers==0.22.3
+jsonargparse==4.27.0
+llava @ git+https://github.com/haotian-liu/LLaVA
+ml_collections==0.1.1
+numpy==1.26.1
+Pillow==10.1.0
+Pillow==10.1.0
+torch==2.1.0
+torchvision==0.16.0
+tqdm==4.66.1
+transformers==4.35.0
+vllm==0.2.1.post1
