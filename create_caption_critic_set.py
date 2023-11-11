@@ -70,6 +70,8 @@ def main(
     ):
 
     diffusion_db = load_dataset("poloclub/diffusiondb", "2m_text_only", split="train").shuffle(1000)
+    max_n = min(max_n, len(diffusion_db))
+    diffusion_db = iter(diffusion_db)
 
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
     tokenizer = AutoTokenizer.from_pretrained(model_url)
@@ -82,12 +84,22 @@ def main(
 
     prog_bar = tqdm(total=max_n)
 
+    used_prompts = set()
+
     while len(output_data) < max_n:
-        i_range = range(i_start, i_start + request_batch_size)
-        prompts = diffusion_db.select(i_range)['prompt']
         chat_templates = []
-        for prompt in prompts:
+        prompts = []
+        while len(chat_templates) < request_batch_size:
+            prompt = next(diffusion_db)['prompt']
             prompt = prompt.strip()
+
+            if prompt in used_prompts:
+                continue
+
+            prompts.append(prompt)
+
+            used_prompts.add(prompt)
+
             chat = [
                     {"role":"system", "content": prompt_sys},
                     {"role":"user", "content": prompt_recaption},
@@ -104,7 +116,7 @@ def main(
             output_data.append(
                     dict(
                         prompt_original=prompt,
-                        prompt_upscaled=output.outputs[0].text.strip(),
+                        prompt_upscaled=output.outputs[0].text.strip().replace("\"", ""),
                         )
                     )
 

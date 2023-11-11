@@ -1,5 +1,6 @@
 import contextlib
 from typing import Tuple
+from diffusers.pipelines.latent_consistency_models import LatentConsistencyModelPipeline
 import torchvision
 from tqdm import tqdm
 import torch
@@ -11,9 +12,10 @@ from dataclasses import dataclass, asdict
 import wandb
 import random
 
-from diffusers import StableDiffusionPipeline, DDIMScheduler, UNet2DConditionModel
+from diffusers import DiffusionPipeline, DDIMScheduler, UNet2DConditionModel
 from diffusers.loaders import AttnProcsLayers
 from diffusers.models.attention_processor import LoRAAttnProcessor
+from artcritic.patched_lcm_call import patched_call
 
 from artcritic.prompts import DiffusionDBPromptUpscaled
 from artcritic.reward.dummy import DummyReward
@@ -55,7 +57,7 @@ class TrainingArgs:
     # maximum gradient norm for gradient clipping.
     max_grad_norm:float = 1.0    
     grad_scale:int = 1
-    lora_rank:int = 2
+    lora_rank:int = 1
 
     max_n_batches:int = 1000
     batch_size:int = 1
@@ -69,13 +71,13 @@ class TrainingArgs:
 @dataclass
 class ModelArgs:
     # base model to load. either a path to a local directory, or a model name from the HuggingFace model hub.
-    model_name_or_url:str = "runwayml/stable-diffusion-v1-5"
+    model_name_or_url:str = "SimianLuo/LCM_Dreamshaper_v7"
     # revision of the model to load.
     revision:str = "main"
 
-    model_steps:int = 20
+    model_steps:int = 4
 
-    sd_guidance_scale:float = 7.5
+    sd_guidance_scale:float = 8.0
 
 def main(train_args: TrainingArgs=TrainingArgs(),
          model_args: ModelArgs=ModelArgs(),
@@ -102,7 +104,10 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     set_seed(train_args.seed, device_specific=True)
     
     # load scheduler, tokenizer and models.
-    pipeline = StableDiffusionPipeline.from_pretrained(model_args.model_name_or_url, revision=model_args.revision)
+    pipeline:DiffusionPipeline = DiffusionPipeline.from_pretrained(model_args.model_name_or_url, revision=model_args.revision)
+
+    if isinstance(pipeline, LatentConsistencyModelPipeline):
+        pipeline.__call__ = lambda *args, **kwargs : patched_call(*args, **kwargs)
     
     # freeze parameters of models to save more memory
     pipeline.vae.requires_grad_(False)

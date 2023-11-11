@@ -61,6 +61,7 @@ class LlavaReward(Reward):
             mod.requires_grad_(False)
 
         model.gradient_checkpointing_enable()
+        model.model.gradient_checkpointing_enable()
 
         # needs to monkey patch the vision tower so it doesn't have the @no_grad decorator
         model.model.vision_tower.forward = lambda images: _clip_vision_tower_forward(model.model.vision_tower, images)
