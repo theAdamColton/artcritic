@@ -1,5 +1,5 @@
 from typing import List
-from transformers import BitsAndBytesConfig,DataCollatorForSeq2Seq, AutoTokenizer
+from transformers import BitsAndBytesConfig, DataCollatorForLanguageModeling,DataCollatorForSeq2Seq, AutoTokenizer, DataCollatorWithPadding
 from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 import torch
 from llava import LlavaLlamaForCausalLM
@@ -135,9 +135,14 @@ class LlavaReward(Reward):
             batched_labels.append(targets)
 
         # pads
-        collator = DataCollatorForSeq2Seq(self.tokenizer, model=None, padding='max_length', max_length = self.max_seq_len)
+        collator = DataCollatorWithPadding(self.tokenizer, padding=True, max_length = self.max_seq_len)
         features = [{"labels":labels, "input_ids": input_ids} for input_ids, labels in zip(batched_input_ids, batched_labels)]
-        model_inputs = collator(features, return_tensors="pt")
+        import bpdb
+        bpdb.set_trace()
+        model_inputs = collator(features)
+
+        import bpdb
+        bpdb.set_trace()
 
         # clips to max seq length
         model_inputs = {k:v[:,:self.max_seq_len] for k,v in model_inputs.items()}
