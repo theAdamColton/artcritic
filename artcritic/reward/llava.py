@@ -80,6 +80,9 @@ class LlavaReward(Reward):
 
         self.max_seq_len = max_seq_len
 
+        for p in model.parameters():
+            p.requires_grad_(False)
+
         self.model = model
         self.tokenizer = tokenizer
         self.conv_template = llava_conv_templates[conv_mode].copy()

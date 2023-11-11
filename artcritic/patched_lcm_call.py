@@ -1,4 +1,6 @@
+from torch.utils import checkpoint
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
+from diffusers.pipelines.latent_consistency_models import LatentConsistencyModelPipeline
 from diffusers.utils import deprecate
 from typing import Union, List, Optional, Callable, Dict, Any
 import torch
@@ -8,8 +10,8 @@ import torch
 # https://github.com/huggingface/diffusers/blob/482a9dd36a7de5a4a82dde3452981165412f6d3a/src/diffusers/pipelines/latent_consistency_models/pipeline_latent_consistency_text2img.py#L525
 # but uses grad checkpointing
 # and doesn't disable gradients
-def patched_call(
-    self,
+def lcm_patched_call(
+    self: LatentConsistencyModelPipeline,
     prompt: Union[str, List[str]] = None,
     height: Optional[int] = None,
     width: Optional[int] = None,
@@ -26,6 +28,8 @@ def patched_call(
     clip_skip: Optional[int] = None,
     callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
     callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+
+    use_gradient_checkpointing:Optional[bool] = None,
     **kwargs,
 ):
     r"""
@@ -190,14 +194,28 @@ def patched_call(
             latents = latents.to(prompt_embeds.dtype)
 
             # model prediction (v-prediction, eps, x)
-            model_pred = self.unet(
-                latents,
-                t,
-                timestep_cond=w_embedding,
-                encoder_hidden_states=prompt_embeds,
-                cross_attention_kwargs=self.cross_attention_kwargs,
-                return_dict=False,
-            )[0]
+            # use checkpointing
+            if use_gradient_checkpointing:
+                model_pred = checkpoint.checkpoint(
+                        lambda kwargs: self.unet(**kwargs),
+                        {
+                            "sample":latents,
+                            "timestep": t,
+                            "encoder_hidden_states": prompt_embeds,
+                            "cross_attention_kwargs": self.cross_attention_kwargs,
+                            "return_dict": False,
+                         },
+                        use_reentrant=False
+                        )[0]
+            else:
+                model_pred = self.unet(
+                    latents,
+                    t,
+                    timestep_cond=w_embedding,
+                    encoder_hidden_states=prompt_embeds,
+                    cross_attention_kwargs=self.cross_attention_kwargs,
+                    return_dict=False,
+                )[0]
 
             # compute the previous noisy sample x_t -> x_t-1
             latents, denoised = self.scheduler.step(model_pred, t, latents, **extra_step_kwargs, return_dict=False)

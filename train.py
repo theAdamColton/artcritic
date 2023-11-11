@@ -5,7 +5,6 @@ import torchvision
 from tqdm import tqdm
 import torch
 from accelerate import Accelerator
-import torch.utils.checkpoint as checkpoint
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from dataclasses import dataclass, asdict
@@ -15,11 +14,15 @@ import random
 from diffusers import DiffusionPipeline, DDIMScheduler, UNet2DConditionModel
 from diffusers.loaders import AttnProcsLayers
 from diffusers.models.attention_processor import LoRAAttnProcessor
-from artcritic.patched_lcm_call import patched_call
+from artcritic.patched_lcm_call import lcm_patched_call
 
 from artcritic.prompts import DiffusionDBPromptUpscaled
 from artcritic.reward.dummy import DummyReward
+from artcritic.reward.hps import HPSReward
 from artcritic.reward.llava import LlavaReward
+
+
+logger = get_logger(__name__, log_level="INFO")
 
 @dataclass
 class TrainingArgs:
@@ -95,8 +98,6 @@ def main(train_args: TrainingArgs=TrainingArgs(),
             project_name="align-prop", config=config_d,
         )
 
-    logger = get_logger(__name__, log_level="INFO")
-
     
     logger.info(f"\n{config_d}")
 
@@ -107,7 +108,9 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     pipeline:DiffusionPipeline = DiffusionPipeline.from_pretrained(model_args.model_name_or_url, revision=model_args.revision)
 
     if isinstance(pipeline, LatentConsistencyModelPipeline):
-        pipeline.__call__ = lambda *args, **kwargs : patched_call(*args, **kwargs)
+        patched_call = lcm_patched_call
+    else:
+        raise ValueError(f"unrecognized pipeline class! {type(pipeline)}")
     
     # freeze parameters of models to save more memory
     pipeline.vae.requires_grad_(False)
@@ -126,10 +129,6 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         desc="Timestep",
         dynamic_ncols=True,
     )
-
-    # switch to DDIM scheduler
-    pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
-    pipeline.scheduler.set_timesteps(model_args.model_steps)
 
     # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.    
@@ -189,7 +188,6 @@ def main(train_args: TrainingArgs=TrainingArgs(),
 
     accelerator.register_save_state_pre_hook(save_model_hook)
 
-
     optimizer = torch.optim.AdamW(
         unet.parameters(),
         lr=train_args.learning_rate,
@@ -203,19 +201,6 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     # TODO no val dataset
     eval_prompter = DiffusionDBPromptUpscaled(seed=train_args.seed+1, split='train')
 
-    # generate negative prompt embeddings
-    neg_prompt_embed = pipeline.text_encoder(
-        pipeline.tokenizer(
-            [""],
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=pipeline.tokenizer.model_max_length,
-        ).input_ids.to(accelerator.device)
-    )[0]
-
-    train_neg_prompt_embeds = neg_prompt_embed.repeat(train_args.batch_size, 1, 1)
-
     autocast = contextlib.nullcontext
     
     # Prepare everything with our `accelerator`.
@@ -225,10 +210,10 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         reward_fn = LlavaReward(inference_dtype=inference_dtype, device=accelerator.device)
     elif train_args.reward_type == "dummy":
         reward_fn = DummyReward(inference_dtype=inference_dtype, device=accelerator.device)
+    elif train_args.reward_type == "hps":
+        reward_fn = HPSReward(inference_dtype=inference_dtype, device=accelerator.device)
     else:
         raise NotImplementedError
-
-    timesteps = pipeline.scheduler.timesteps
 
     def load_model_hook(models, input_dir):
         assert len(models) == 1
@@ -254,11 +239,9 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     global_step = 0
 
     #################### TRAINING ####################        
-    for i in list(range(first_epoch, train_args.max_n_batches)):
+    for i in tqdm(range(first_epoch, train_args.max_n_batches)):
         unet.train()
         
-        latent = torch.randn((train_args.batch_size, 4, 64, 64), device=accelerator.device, dtype=inference_dtype)    
-
         if accelerator.is_main_process:
             logger.info(f"{wandb.run.name} train_batch {i}: training")
 
@@ -271,51 +254,12 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         prompts_upscaled = [x[0]['prompt_upscaled'] for x in prompt_batch]
         prompts_upscaled = [p.strip().replace("\"","") for p in prompts_upscaled]
 
-        prompt_ids = pipeline.tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=pipeline.tokenizer.model_max_length,
-        ).input_ids.to(accelerator.device)   
-
-        pipeline.scheduler.alphas_cumprod = pipeline.scheduler.alphas_cumprod.to(accelerator.device)
-        prompt_embeds = pipeline.text_encoder(prompt_ids)[0]         
-        
         with accelerator.accumulate(unet):
             with autocast():
                 with torch.enable_grad(): # important b/c don't have on by default in module                        
-                    for i, t in tqdm(enumerate(timesteps), total=len(timesteps)):
-                        t = torch.tensor([t],
-                                            dtype=inference_dtype,
-                                            device=latent.device)
-                        t = t.repeat(train_args.batch_size)
-                        
-                        if train_args.grad_checkpoint:
-                            noise_pred_uncond = checkpoint.checkpoint(unet, latent, t, train_neg_prompt_embeds, use_reentrant=False).sample
-                            noise_pred_cond = checkpoint.checkpoint(unet, latent, t, prompt_embeds, use_reentrant=False).sample
-                        else:
-                            noise_pred_uncond = unet(latent, t, train_neg_prompt_embeds).sample
-                            noise_pred_cond = unet(latent, t, prompt_embeds).sample
-                                                        
-                        if train_args.truncated_backprop:
-                            if train_args.truncated_backprop_rand:
-                                timestep = random.randint(train_args.truncated_backprop_minmax[0],train_args.truncated_backprop_minmax[1])
-                                if i < timestep:
-                                    noise_pred_uncond = noise_pred_uncond.detach()
-                                    noise_pred_cond = noise_pred_cond.detach()
-                            else:
-                                if i < train_args.trunc_backprop_timestep:
-                                    noise_pred_uncond = noise_pred_uncond.detach()
-                                    noise_pred_cond = noise_pred_cond.detach()
+                    ims = patched_call(pipeline, prompts, output_type="pt", guidance_scale=model_args.sd_guidance_scale, num_inference_steps=model_args.model_steps, use_gradient_checkpointing=train_args.grad_checkpoint).images
 
-                        grad = (noise_pred_cond - noise_pred_uncond)
-                        noise_pred = noise_pred_uncond + model_args.sd_guidance_scale * grad                
-                        latent = pipeline.scheduler.step(noise_pred, t[0].long(), latent).prev_sample
-                                            
-                    ims = pipeline.vae.decode(latent.to(pipeline.vae.dtype) / 0.18215).sample
-                    
-                    loss, rewards = reward_fn(ims, prompts_upscaled)
+                    loss, reward = reward_fn(ims, prompts_upscaled)
                     
                     logger.info(f"loss {loss.item():.4f}")
 
@@ -336,9 +280,9 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                     if (i+1) % train_args.log_images_every == 0:
                         images = []
                         for i, image in enumerate(ims):
-                            image = (image.clone().detach() / 2 + 0.5).clamp(0, 1)
+                            image = image.cpu().detach().clamp(0,1)
                             pil = torchvision.transforms.ToPILImage()(image)
-                            images.append(wandb.Image(pil, caption=f"{prompts[i]} | {prompts_upscaled[i]} | {rewards:.2f}"))
+                            images.append(wandb.Image(pil, caption=f"{prompts[i]} | {prompts_upscaled[i]} | {reward.item():.2f}"))
                         
                         accelerator.log(
                             {"images": images, "loss":loss},
