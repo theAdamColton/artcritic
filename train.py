@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 import wandb
 import random
 
-from diffusers import DiffusionPipeline, DDIMScheduler, UNet2DConditionModel
+from diffusers import DiffusionPipeline, UNet2DConditionModel
 from diffusers.loaders import AttnProcsLayers
 from diffusers.models.attention_processor import LoRAAttnProcessor
 from artcritic.patched_lcm_call import lcm_patched_call
@@ -85,6 +85,9 @@ class ModelArgs:
 def main(train_args: TrainingArgs=TrainingArgs(),
          model_args: ModelArgs=ModelArgs(),
          ):
+
+    generator = torch.Generator().manual_seed(train_args.seed)
+
     accelerator = Accelerator(
         log_with="wandb",
         mixed_precision=train_args.precision,
@@ -257,7 +260,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         with accelerator.accumulate(unet):
             with autocast():
                 with torch.enable_grad(): # important b/c don't have on by default in module                        
-                    ims = patched_call(pipeline, prompts, output_type="pt", guidance_scale=model_args.sd_guidance_scale, num_inference_steps=model_args.model_steps, use_gradient_checkpointing=train_args.grad_checkpoint).images
+                    ims = patched_call(pipeline, prompts, output_type="pt", guidance_scale=model_args.sd_guidance_scale, num_inference_steps=model_args.model_steps, use_gradient_checkpointing=train_args.grad_checkpoint, generator=generator).images
 
                     loss, reward = reward_fn(ims, prompts_upscaled)
                     

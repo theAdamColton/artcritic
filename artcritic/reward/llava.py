@@ -32,6 +32,7 @@ class LlavaReward(Reward):
                  device='cuda',
         model_path = "liuhaotian/llava-v1.5-13b",
                  max_seq_len: int = 256,
+                 torch_compile=False,
                      ):
         print("LOADING LLAVA MODEL")
 
@@ -48,7 +49,8 @@ class LlavaReward(Reward):
         # put everything on gpu, but specify max_memory, which should automate offloading
         # TODO try to have auto device map
         device_map = {"":0,}
-        model:LlavaLlamaForCausalLM = LlavaLlamaForCausalLM.from_pretrained(model_path, quantization_config=bnb_config, torch_dtype=torch.float16, device_map=device_map, max_memory={0:'6GB'},)
+        model:LlavaLlamaForCausalLM = LlavaLlamaForCausalLM.from_pretrained(model_path, quantization_config=bnb_config, torch_dtype=torch.float16, device_map=device_map, max_memory={0:'6GB', "cpu": "24GB"},)
+        #model:LlavaLlamaForCausalLM = LlavaLlamaForCausalLM.from_pretrained(model_path, torch_dtype=inference_dtype, device_map="auto", max_memory={0:'1GB', "cpu": "24GB"}, offload_folder="/tmp/huggingface/")
 
         model = model.eval()
 
@@ -65,6 +67,9 @@ class LlavaReward(Reward):
 
         # needs to monkey patch the vision tower so it doesn't have the @no_grad decorator
         model.model.vision_tower.forward = lambda images: _clip_vision_tower_forward(model.model.vision_tower, images)
+
+        if torch_compile:
+            model = torch.compile(model)
 
         print("DONE LOADING LLAVA MODEL")
 
@@ -130,7 +135,7 @@ class LlavaReward(Reward):
             batched_labels.append(targets)
 
         # pads
-        collator = DataCollatorForSeq2Seq(self.tokenizer, model=None, pad_to_multiple_of=64)
+        collator = DataCollatorForSeq2Seq(self.tokenizer, model=None, padding='max_length', max_length = self.max_seq_len)
         features = [{"labels":labels, "input_ids": input_ids} for input_ids, labels in zip(batched_input_ids, batched_labels)]
         model_inputs = collator(features, return_tensors="pt")
 
@@ -149,9 +154,9 @@ class LlavaReward(Reward):
         Does everything that the image_processor (CLIPImageProcessor)
         does, but using native pytorch differentiable operations
         """
-        x = ((x / 2) + 0.5).clamp(0, 1) 
+        #x = ((x / 2) + 0.5).clamp(0, 1) 
         to_h, to_w = self.image_processor.crop_size['height'], self.image_processor.crop_size['width']
-        x= torchvision.transforms.Resize((to_h, to_w))(x)
+        x= torchvision.transforms.Resize((to_h, to_w), antialias=True)(x)
 
         # normalizes
         image_mean = self.image_processor.image_mean
