@@ -135,8 +135,9 @@ class LlavaReward(Reward):
             batched_labels.append(targets)
 
         # pads
-        collator = DataCollatorWithPadding(self.tokenizer, padding=True, max_length = self.max_seq_len)
-        features = [{"labels":labels, "input_ids": input_ids} for input_ids, labels in zip(batched_input_ids, batched_labels)]
+        collator = DataCollatorForSeq2Seq(self.tokenizer, None, padding=True, )
+        features = [{"labels":torch.LongTensor(labels), "input_ids": torch.LongTensor(input_ids)} for input_ids, labels in zip(batched_input_ids, batched_labels)]
+
         model_inputs = collator(features)
 
         # clips to max seq length
