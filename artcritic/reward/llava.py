@@ -137,12 +137,7 @@ class LlavaReward(Reward):
         # pads
         collator = DataCollatorWithPadding(self.tokenizer, padding=True, max_length = self.max_seq_len)
         features = [{"labels":labels, "input_ids": input_ids} for input_ids, labels in zip(batched_input_ids, batched_labels)]
-        import bpdb
-        bpdb.set_trace()
         model_inputs = collator(features)
-
-        import bpdb
-        bpdb.set_trace()
 
         # clips to max seq length
         model_inputs = {k:v[:,:self.max_seq_len] for k,v in model_inputs.items()}
