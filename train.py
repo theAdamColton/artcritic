@@ -283,7 +283,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                     if (i+1) % train_args.log_images_every == 0:
                         images = []
                         for i, image in enumerate(ims):
-                            image = image.cpu().detach().clamp(0,1)
+                            image = image.clamp(0,1).cpu().detach()
                             pil = torchvision.transforms.ToPILImage()(image)
                             images.append(wandb.Image(pil, caption=f"{prompts[i]} | {prompts_upscaled[i]} | {reward.item():.2f}"))
                         
