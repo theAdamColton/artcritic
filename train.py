@@ -89,7 +89,7 @@ class ModelArgs:
 
     model_steps:int = 4
 
-    sd_guidance_scale:float = 3.0
+    sd_guidance_scale:float = 0.0
 
     torch_compile:bool = False
 
