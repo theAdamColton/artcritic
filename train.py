@@ -1,5 +1,5 @@
 import contextlib
-from typing import Tuple
+from typing import Optional, Tuple
 from diffusers.pipelines.latent_consistency_models import LatentConsistencyModelPipeline
 import torchvision
 from tqdm import tqdm
@@ -11,10 +11,11 @@ from dataclasses import dataclass, asdict
 import wandb
 import random
 
-from diffusers import DiffusionPipeline, UNet2DConditionModel
+from diffusers import DiffusionPipeline, UNet2DConditionModel, StableDiffusionPipeline, LCMScheduler
 from diffusers.loaders import AttnProcsLayers
 from diffusers.models.attention_processor import LoRAAttnProcessor
 from artcritic.patched_lcm_call import lcm_patched_call
+from artcritic.patched_sd_call import sd_patched_call
 
 from artcritic.prompts import DiffusionDBPromptUpscaled
 from artcritic.reward.dummy import DummyReward
@@ -26,7 +27,7 @@ logger = get_logger(__name__, log_level="INFO")
 
 @dataclass
 class TrainingArgs:
-    save_freq:int = 100
+    save_freq:int = 500
 
     reward_type:str = "llava"
     
@@ -62,25 +63,35 @@ class TrainingArgs:
     grad_scale:int = 1
     lora_rank:int = 1
 
-    max_n_batches:int = 1000
+    max_n_batches:int = 10000
     batch_size:int = 1
-    gradient_accumulation_steps:int = 1
+    gradient_accumulation_steps:int = 4
 
     resume_from:str = ""
 
-    log_images_every: int = 4
+    log_images_every: int = 8
+
+    eval_every:int = 8
 
 
 @dataclass
 class ModelArgs:
     # base model to load. either a path to a local directory, or a model name from the HuggingFace model hub.
-    model_name_or_url:str = "SimianLuo/LCM_Dreamshaper_v7"
+    model_name_or_url:str = "runwayml/stable-diffusion-v1-5"
+
+    # name of lora model if any
+    adapter_name_or_url: Optional[str] = "latent-consistency/lcm-lora-sdv1-5"
+
+    is_lcm:bool = True
+
     # revision of the model to load.
     revision:str = "main"
 
     model_steps:int = 4
 
-    sd_guidance_scale:float = 8.0
+    sd_guidance_scale:float = 3.0
+
+    torch_compile:bool = False
 
 def main(train_args: TrainingArgs=TrainingArgs(),
          model_args: ModelArgs=ModelArgs(),
@@ -110,16 +121,30 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     # load scheduler, tokenizer and models.
     pipeline:DiffusionPipeline = DiffusionPipeline.from_pretrained(model_args.model_name_or_url, revision=model_args.revision)
 
+    if model_args.is_lcm:
+        pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
+
     if isinstance(pipeline, LatentConsistencyModelPipeline):
         patched_call = lcm_patched_call
+    elif isinstance(pipeline, StableDiffusionPipeline):
+        patched_call = sd_patched_call
     else:
         raise ValueError(f"unrecognized pipeline class! {type(pipeline)}")
+
+    if model_args.adapter_name_or_url is not None:
+        pipeline.load_lora_weights(model_args.adapter_name_or_url)
+        pipeline.fuse_lora()
     
     # freeze parameters of models to save more memory
     pipeline.vae.requires_grad_(False)
     pipeline.text_encoder.requires_grad_(False)
     pipeline.unet.requires_grad_(False)
 
+    if model_args.torch_compile:
+        pipeline.unet = torch.compile(pipeline.unet)
+
+    pipeline.enable_xformers_memory_efficient_attention()
+    #pipeline.enable_model_cpu_offload()
 
     # disable safety checker
     pipeline.safety_checker = None    
@@ -201,8 +226,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
 
     train_prompter = DiffusionDBPromptUpscaled(seed=train_args.seed, split='train')
 
-    # TODO no val dataset
-    eval_prompter = DiffusionDBPromptUpscaled(seed=train_args.seed+1, split='train')
+    eval_prompter = DiffusionDBPromptUpscaled(seed=train_args.seed+1, split='test')
 
     autocast = contextlib.nullcontext
     
@@ -241,6 +265,8 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     first_epoch = 0 
     global_step = 0
 
+    losses_to_log = 0.0
+
     #################### TRAINING ####################        
     for i in tqdm(range(first_epoch, train_args.max_n_batches)):
         unet.train()
@@ -248,21 +274,23 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         if accelerator.is_main_process:
             logger.info(f"{wandb.run.name} train_batch {i}: training")
 
-        prompt_batch = [
+        train_prompt_batch = [
                 train_prompter() for _ in range(train_args.batch_size)
             ]
 
-        prompts = [x[0]['prompt_original'] for x in prompt_batch]
-        prompts = [p.strip().replace("\"","") for p in prompts]
-        prompts_upscaled = [x[0]['prompt_upscaled'] for x in prompt_batch]
-        prompts_upscaled = [p.strip().replace("\"","") for p in prompts_upscaled]
+        train_prompts = [x[0]['prompt_original'] for x in train_prompt_batch]
+        train_prompts = [p.strip().replace("\"","") for p in train_prompts]
+        train_prompts_upscaled = [x[0]['prompt_upscaled'] for x in train_prompt_batch]
+        train_prompts_upscaled = [p.strip().replace("\"","") for p in train_prompts_upscaled]
 
         with accelerator.accumulate(unet):
             with autocast():
                 with torch.enable_grad(): # important b/c don't have on by default in module                        
-                    ims = patched_call(pipeline, prompts, output_type="pt", guidance_scale=model_args.sd_guidance_scale, num_inference_steps=model_args.model_steps, use_gradient_checkpointing=train_args.grad_checkpoint, generator=generator).images
+                    ims = patched_call(pipeline, train_prompts, output_type="pt", guidance_scale=model_args.sd_guidance_scale, num_inference_steps=model_args.model_steps, use_gradient_checkpointing=train_args.grad_checkpoint, generator=generator).images
 
-                    loss, reward = reward_fn(ims, prompts_upscaled)
+                    loss, reward = reward_fn(ims, train_prompts)
+
+                    losses_to_log += loss.item()
                     
                     logger.info(f"loss {loss.item():.4f}")
 
@@ -271,32 +299,57 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                     if accelerator.sync_gradients:
                         accelerator.clip_grad_norm_(unet.parameters(), train_args.max_grad_norm)
 
-                    _s = 0.0
-                    for p in unet.parameters():
-                        if p.requires_grad:
-                            _s += p.grad.sum() * 1000
-                    print("grad sum", _s)
-
                     optimizer.step()
                     optimizer.zero_grad()                        
 
-                    if (i+1) % train_args.log_images_every == 0:
-                        images = []
-                        for i, image in enumerate(ims):
-                            image = image.clamp(0,1).cpu().detach()
-                            pil = torchvision.transforms.ToPILImage()(image)
-                            images.append(wandb.Image(pil, caption=f"{prompts[i]} | {prompts_upscaled[i]} | {reward.item():.2f}"))
-                        
-                        accelerator.log(
-                            {"images": images, "loss":loss},
-                            step=global_step,
-                        )
+        if (i+1) % train_args.log_images_every == 0:
+            images = []
+            for i, image in enumerate(ims):
+                image = image.clamp(0,1).cpu().detach()
+                pil = torchvision.transforms.ToPILImage()(image)
+                images.append(wandb.Image(pil, caption=f"{train_prompts[i]} | {train_prompts_upscaled[i]} | {reward.item():.2f}"))
+            
+            accelerator.log(
+                    {"train":{"images": images, "loss":losses_to_log / train_args.log_images_every}},
+                step=global_step,
+            )
 
-                global_step += 1
+            losses_to_log = 0.0
+
+        global_step += 1
 
         
         if (i+1) % train_args.save_freq == 0 and accelerator.is_main_process:
             accelerator.save_state("out/")
+
+        if (i+1) % train_args.eval_every == 0 or i==0 or i==train_args.max_n_batches-1:
+            # TODO eval batch size
+            eval_prompt_batch = eval_prompter.ds[:8]
+            eval_prompts = eval_prompt_batch['prompt_original']
+            eval_prompts = [p.strip().replace("\"","") for p in eval_prompts]
+            eval_prompts_upscaled = eval_prompt_batch['prompt_upscaled']
+            eval_prompts_upscaled = [p.strip().replace("\"","") for p in eval_prompts_upscaled]
+
+            with torch.inference_mode():
+                eval_generator = torch.Generator().manual_seed(420)
+                ims = pipeline(eval_prompts,
+                            output_type="pt",
+                               guidance_scale=model_args.sd_guidance_scale,
+                               num_inference_steps=model_args.model_steps,
+                               use_gradient_checkpointing=train_args.grad_checkpoint,
+                               generator=eval_generator,
+                               ).images
+                loss, reward = reward_fn(ims, eval_prompts)
+            images = []
+            for i, image in enumerate(ims):
+                image = image.clamp(0,1).cpu().detach()
+                pil = torchvision.transforms.ToPILImage()(image)
+                images.append(wandb.Image(pil, caption=f"{eval_prompts[i]} | {eval_prompts_upscaled[i]}"))
+            
+            accelerator.log(
+                    {"test":{"images": images, "loss": loss}},
+                step=global_step,
+            )
 
 
 if __name__ == "__main__":

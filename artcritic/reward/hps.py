@@ -1,3 +1,4 @@
+import torch
 from transformers import CLIPModel, CLIPProcessor
 import torchvision
 
