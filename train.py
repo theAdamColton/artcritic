@@ -80,6 +80,8 @@ class ModelArgs:
     # name of lora model if any
     adapter_name_or_url: Optional[str] = "latent-consistency/lcm-lora-sdv1-5"
 
+    adapter_name_or_url_2: Optional[str] = None
+
     is_lcm:bool = True
 
     # revision of the model to load.
@@ -90,6 +92,45 @@ class ModelArgs:
     sd_guidance_scale:float = 3.0
 
     torch_compile:bool = False
+
+    def load_model(self) -> DiffusionPipeline:
+        model_args = self
+        # load scheduler, tokenizer and models.
+        pipeline= DiffusionPipeline.from_pretrained(model_args.model_name_or_url, revision=model_args.revision)
+        if model_args.is_lcm:
+            pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
+
+        if model_args.adapter_name_or_url is not None:
+            pipeline.load_lora_weights(model_args.adapter_name_or_url)
+            pipeline.fuse_lora()
+
+        if model_args.adapter_name_or_url_2 is not None:
+            pipeline.load_lora_weights(model_args.adapter_name_or_url_2)
+            pipeline.fuse_lora()
+        
+        # freeze parameters of models to save more memory
+        pipeline.vae.requires_grad_(False)
+        pipeline.text_encoder.requires_grad_(False)
+        pipeline.unet.requires_grad_(False)
+
+        if model_args.torch_compile:
+            pipeline.unet = torch.compile(pipeline.unet)
+
+        pipeline.enable_xformers_memory_efficient_attention()
+        #pipeline.enable_model_cpu_offload()
+
+        # disable safety checker
+        pipeline.safety_checker = None    
+        
+        # make the progress bar nicer
+        pipeline.set_progress_bar_config(
+            position=1,
+            leave=False,
+            desc="Timestep",
+            dynamic_ncols=True,
+        )
+
+        return pipeline
 
 def main(train_args: TrainingArgs=TrainingArgs(),
          model_args: ModelArgs=ModelArgs(),
@@ -116,11 +157,8 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     # set seed (device_specific is very important to get different prompts on different devices)
     set_seed(train_args.seed, device_specific=True)
     
-    # load scheduler, tokenizer and models.
-    pipeline:DiffusionPipeline = DiffusionPipeline.from_pretrained(model_args.model_name_or_url, revision=model_args.revision)
+    pipeline = model_args.load_model()
 
-    if model_args.is_lcm:
-        pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
 
     if isinstance(pipeline, LatentConsistencyModelPipeline):
         patched_call = lcm_patched_call
@@ -128,33 +166,6 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         patched_call = sd_patched_call
     else:
         raise ValueError(f"unrecognized pipeline class! {type(pipeline)}")
-
-    if model_args.adapter_name_or_url is not None:
-        pipeline.load_lora_weights(model_args.adapter_name_or_url)
-        pipeline.fuse_lora()
-    
-    # freeze parameters of models to save more memory
-    pipeline.vae.requires_grad_(False)
-    pipeline.text_encoder.requires_grad_(False)
-    pipeline.unet.requires_grad_(False)
-
-    if model_args.torch_compile:
-        pipeline.unet = torch.compile(pipeline.unet)
-
-    pipeline.enable_xformers_memory_efficient_attention()
-    #pipeline.enable_model_cpu_offload()
-
-    # disable safety checker
-    pipeline.safety_checker = None    
-    
-    # make the progress bar nicer
-    pipeline.set_progress_bar_config(
-        position=1,
-        disable=not accelerator.is_local_main_process,
-        leave=False,
-        desc="Timestep",
-        dynamic_ncols=True,
-    )
 
     # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.    
