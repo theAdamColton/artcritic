@@ -31,7 +31,7 @@ class LlavaReward(Reward):
         inference_dtype=torch.float16,
                  device='cuda',
         model_path = "liuhaotian/llava-v1.5-13b",
-                 max_seq_len: int = 256,
+                 max_seq_len: int = 512,
                  torch_compile=False,
                      ):
         print("LOADING LLAVA MODEL")
@@ -135,7 +135,7 @@ class LlavaReward(Reward):
             batched_labels.append(targets)
 
         # pads
-        collator = DataCollatorForSeq2Seq(self.tokenizer, None, padding=True, )
+        collator = DataCollatorForSeq2Seq(self.tokenizer, None, padding=True, pad_to_multiple_of=64)
         features = [{"labels":torch.LongTensor(labels), "input_ids": torch.LongTensor(input_ids)} for input_ids, labels in zip(batched_input_ids, batched_labels)]
 
         model_inputs = collator(features)

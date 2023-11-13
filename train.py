@@ -342,7 +342,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
             for i, image in enumerate(ims):
                 image = image.clamp(0,1).cpu().detach()
                 pil = torchvision.transforms.ToPILImage()(image)
-                images.append(wandb.Image(pil, caption=f"{eval_prompts[i]} | {eval_prompts_upscaled[i]}"))
+                images.append(wandb.Image(pil, caption=f"{eval_prompts[i]} | {eval_prompts_upscaled[i]} | {reward.item():.2f}"))
             
             accelerator.log(
                     {"test":{"images": images, "loss": loss}},
