@@ -45,9 +45,6 @@ class TrainingArgs:
     grad_checkpoint:bool = True
     same_evaluation:bool = True
     
-    loss_coeff:float = 1.0
-    # whether to use the 8bit Adam optimizer from bitsandbytes.
-    use_8bit_adam:bool = False
     # learning rate.
     learning_rate:float = 3e-4
     # Adam beta1.
@@ -60,7 +57,6 @@ class TrainingArgs:
     adam_epsilon:float = 1e-8 
     # maximum gradient norm for gradient clipping.
     max_grad_norm:float = 1.0    
-    grad_scale:int = 1
     lora_rank:int = 1
 
     max_n_batches:int = 10000
@@ -72,6 +68,8 @@ class TrainingArgs:
     log_images_every: int = 8
 
     eval_every:int = 8
+
+    eval_batch_size: int = 4
 
 
 @dataclass
@@ -288,7 +286,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                 with torch.enable_grad(): # important b/c don't have on by default in module                        
                     ims = patched_call(pipeline, train_prompts, output_type="pt", guidance_scale=model_args.sd_guidance_scale, num_inference_steps=model_args.model_steps, use_gradient_checkpointing=train_args.grad_checkpoint, generator=generator).images
 
-                    loss, reward = reward_fn(ims, train_prompts)
+                    loss, reward = reward_fn(ims, train_prompts, train_prompts_upscaled)
 
                     losses_to_log += loss.item()
                     
@@ -324,7 +322,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
 
         if (i+1) % train_args.eval_every == 0 or i==0 or i==train_args.max_n_batches-1:
             # TODO eval batch size
-            eval_prompt_batch = eval_prompter.ds[:8]
+            eval_prompt_batch = eval_prompter.ds[:train_args.eval_batch_size]
             eval_prompts = eval_prompt_batch['prompt_original']
             eval_prompts = [p.strip().replace("\"","") for p in eval_prompts]
             eval_prompts_upscaled = eval_prompt_batch['prompt_upscaled']
@@ -339,7 +337,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                                use_gradient_checkpointing=train_args.grad_checkpoint,
                                generator=eval_generator,
                                ).images
-                loss, reward = reward_fn(ims, eval_prompts)
+                loss, reward = reward_fn(ims, eval_prompts, eval_prompts_upscaled)
             images = []
             for i, image in enumerate(ims):
                 image = image.clamp(0,1).cpu().detach()

@@ -124,12 +124,12 @@ class LlavaReward(Reward):
 
         return input_ids, labels
 
-    def __call__(self, pixel_values: torch.Tensor, captions: List[str]):
+    def __call__(self, pixel_values: torch.Tensor, prompts, detailed_captions: List[str], ):
         pixel_values = self._process_image_pixels(pixel_values).to(self.device).to(self.dtype)
 
         batched_input_ids = []
         batched_labels = []
-        for cap in captions:
+        for cap in detailed_captions:
             input_ids, targets = self._tokenize(cap)
             batched_input_ids.append(input_ids)
             batched_labels.append(targets)

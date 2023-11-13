@@ -22,7 +22,7 @@ class HPSReward(Reward):
         self.normalize = torchvision.transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
                                                     std=[0.26862954, 0.26130258, 0.27577711])
         
-    def __call__(self, im_pix, prompts):    
+    def __call__(self, im_pix, prompts, prompts_detailed):    
         x_var = torchvision.transforms.Resize(self.target_size, antialias=True)(im_pix)
         x_var = self.normalize(x_var).to(im_pix.dtype)
         text_inputs = self.processor(text=prompts, return_tensors="pt", padding='max_length', truncation=True)
