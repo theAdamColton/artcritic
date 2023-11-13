@@ -324,15 +324,11 @@ def main(train_args: TrainingArgs=TrainingArgs(),
             )
 
             losses_to_log = 0.0
-
-        global_step += 1
-
         
         if (i+1) % train_args.save_freq == 0 and accelerator.is_main_process:
             accelerator.save_state("out/")
 
-        if (i+1) % train_args.eval_every == 0 or i==0 or i==train_args.max_n_batches-1:
-            # TODO eval batch size
+        if ((i+1) % train_args.eval_every == 0) or (i==0) or (i==train_args.max_n_batches-1):
             eval_prompt_batch = eval_prompter.ds[:train_args.eval_batch_size]
             eval_prompts = eval_prompt_batch['prompt_original']
             eval_prompts = [p.strip().replace("\"","") for p in eval_prompts]
@@ -359,6 +355,8 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                     {"test":{"images": images, "loss": loss}},
                 step=global_step,
             )
+
+        global_step += 1
 
 
 if __name__ == "__main__":
