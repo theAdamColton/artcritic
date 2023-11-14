@@ -32,18 +32,9 @@ class TrainingArgs:
     reward_type:str = "llava"
     
     precision:str  = "fp16"
-    # number of checkpoints to keep before overwriting old ones.
-    num_checkpoint_limit:int = 10
-    # random seed for reproducibility.
     seed:int = 42    
-
-    truncated_backprop:bool = False
-    truncated_backprop_rand:bool = False
-    truncated_backprop_minmax:Tuple[int,int] = (35,45)
-    trunc_backprop_timestep:int = 100
     
     grad_checkpoint:bool = True
-    same_evaluation:bool = True
     
     # learning rate.
     learning_rate:float = 3e-4
@@ -75,7 +66,7 @@ class TrainingArgs:
 @dataclass
 class ModelArgs:
     # base model to load. either a path to a local directory, or a model name from the HuggingFace model hub.
-    model_name_or_url:str = "runwayml/stable-diffusion-v1-5"
+    model_name_or_url:str = "Lykon/dreamshaper-7"
 
     # name of lora model if any
     adapter_name_or_url: Optional[str] = "latent-consistency/lcm-lora-sdv1-5"
@@ -272,13 +263,13 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         accelerator.load_state(train_args.resume_from)
 
     first_epoch = 0 
-    global_step = 0
 
     losses_to_log = 0.0
 
+    unet.train()
+
     #################### TRAINING ####################        
     for i in tqdm(range(first_epoch, train_args.max_n_batches)):
-        unet.train()
         
         if accelerator.is_main_process:
             logger.info(f"{wandb.run.name} train_batch {i}: training")
@@ -311,16 +302,16 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                     optimizer.step()
                     optimizer.zero_grad()                        
 
-        if (i+1) % train_args.log_images_every == 0:
-            images = []
-            for i, image in enumerate(ims):
+        if (i+1) % train_args.log_images_every == 0 or (i==0):
+            train_images = []
+            for j, image in enumerate(ims):
                 image = image.clamp(0,1).cpu().detach()
                 pil = torchvision.transforms.ToPILImage()(image)
-                images.append(wandb.Image(pil, caption=f"{train_prompts[i]} | {train_prompts_upscaled[i]} | {reward.item():.2f}"))
+                train_images.append(wandb.Image(pil, caption=f"{train_prompts[j]} | {train_prompts_upscaled[j]} | {reward.item():.2f}"))
             
             accelerator.log(
-                    {"train":{"images": images, "loss":losses_to_log / train_args.log_images_every}},
-                step=global_step,
+                    {"train":{"images": train_images, "loss":losses_to_log / train_args.log_images_every}},
+                step=i,
             )
 
             losses_to_log = 0.0
@@ -329,6 +320,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
             accelerator.save_state("out/")
 
         if ((i+1) % train_args.eval_every == 0) or (i==0) or (i==train_args.max_n_batches-1):
+            print("running eval...")
             eval_prompt_batch = eval_prompter.ds[:train_args.eval_batch_size]
             eval_prompts = eval_prompt_batch['prompt_original']
             eval_prompts = [p.strip().replace("\"","") for p in eval_prompts]
@@ -345,18 +337,16 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                                generator=eval_generator,
                                ).images
                 loss, reward = reward_fn(ims, eval_prompts, eval_prompts_upscaled)
-            images = []
-            for i, image in enumerate(ims):
+            train_images = []
+            for j, image in enumerate(ims):
                 image = image.clamp(0,1).cpu().detach()
                 pil = torchvision.transforms.ToPILImage()(image)
-                images.append(wandb.Image(pil, caption=f"{eval_prompts[i]} | {eval_prompts_upscaled[i]} | {reward.item():.2f}"))
+                train_images.append(wandb.Image(pil, caption=f"{eval_prompts[j]} | {eval_prompts_upscaled[j]} | {reward.item():.2f}"))
             
             accelerator.log(
-                    {"test":{"images": images, "loss": loss}},
-                step=global_step,
+                    {"test":{"images": train_images, "loss": loss}},
+                step=i,
             )
-
-        global_step += 1
 
 
 if __name__ == "__main__":
