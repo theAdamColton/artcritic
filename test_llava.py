@@ -23,6 +23,7 @@ else:
     pixel_values = pixel_values.to(model.device, dtype=torch.float16)
 
 inp = "Describe and evaluate the quality of the image. Also give an analysis of the content of the image, as if you were describing it to a blind person at an art exhibit."
+inp = "Rate the quality of the image as either amazing, good, bad or terrible."
 inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
 
 if 'llama-2' in model_name.lower():

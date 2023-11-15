@@ -8,6 +8,7 @@ import torch
 from llava import LlavaLlamaForCausalLM
 import torchvision
 import llava.mm_utils as llava_utils
+from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, process_images
 from llava.conversation import conv_templates as llava_conv_templates
 
 from artcritic.reward.reward import Reward
@@ -28,11 +29,12 @@ def _clip_vision_tower_forward(self_vision_tower, images):
 
     return image_features
 
+
 class LlavaReward(Reward):
     def __init__(self,
         inference_dtype=torch.float16,
                  device='cuda',
-                 model_path ="liuhaotian/llava-v1.5-7b",
+                 model_path ="teowu/llava_v1.5_7b_qinstruct_preview_v0.1",
                  max_seq_len: int = 256,
                  torch_compile=False,
                      ):
@@ -83,6 +85,8 @@ class LlavaReward(Reward):
         self.device = device
         self.dtype = inference_dtype
 
+        self.collator = DataCollatorForSeq2Seq(self.tokenizer, None, padding=True, pad_to_multiple_of=64)
+
     def _tokenize(self, assistant_output:str):
         inp = DEFAULT_IMAGE_TOKEN + '\n' + self.captioning_prompt
         conv = self.conv_template.copy()
@@ -123,10 +127,9 @@ class LlavaReward(Reward):
             batched_labels.append(targets)
 
         # pads
-        collator = DataCollatorForSeq2Seq(self.tokenizer, None, padding=True, pad_to_multiple_of=64)
         features = [{"labels":torch.LongTensor(labels), "input_ids": torch.LongTensor(input_ids)} for input_ids, labels in zip(batched_input_ids, batched_labels)]
 
-        model_inputs = collator(features)
+        model_inputs = self.collator(features)
 
         # clips to max seq length
         model_inputs = {k:v[:,:self.max_seq_len] for k,v in model_inputs.items()}
@@ -135,9 +138,15 @@ class LlavaReward(Reward):
 
         outputs = self.model(images=pixel_values, return_dict=True, **model_inputs)
 
-        loss = outputs.loss
+        loss = self._get_loss(outputs)
 
         return loss, -loss
+
+    def _get_loss(self, outputs):
+
+        loss = outputs.loss
+
+        return loss
 
 
     def _process_image_pixels(self,x: torch.Tensor):
@@ -157,3 +166,59 @@ class LlavaReward(Reward):
 
         return x
 
+class LlavaRewardSimpleRater(LlavaReward):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.captioning_prompt = "Rate the quality of the image as either \"Bad\" or \"Good\" or \"Ok\"."
+
+    def __call__(self, pixel_values: torch.Tensor, captions, detailed_captions: List[str], ):
+        pixel_values = self._process_image_pixels(pixel_values).to(self.device).to(self.dtype)
+
+        b = pixel_values.shape[0]
+
+        batched_input_ids = []
+        for cap in captions:
+            inp = f"This image is meant to describe '{cap}'.\n" + self.captioning_prompt
+            inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
+            conv = self.conv_template.copy()
+            conv.append_message(conv.roles[0], inp)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
+            input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').to(self.device)
+            batched_input_ids.append({'input_ids':input_ids})
+
+        model_inputs = self.collator(batched_input_ids)
+        model_inputs = {k:v.to(self.device) for k,v in model_inputs.items()}
+
+        outputs = self.model(images=pixel_values, return_dict=True, **model_inputs)
+
+        good_token = self.tokenizer("Good", add_special_tokens=False)['input_ids']
+        assert len(good_token) == 1
+        good_token = good_token[0]
+
+        bad_token = self.tokenizer("Bad", add_special_tokens=False)['input_ids']
+        assert len(bad_token) == 1
+        bad_token = bad_token[0]
+
+        loss = 0.0
+        for batch_i, input_ids in enumerate(batched_input_ids):
+            input_len = len(input_ids['input_ids'])
+
+            # LLaVA adds visual tokens corresponding to the number of ViT
+            # patches subtracted by 1
+
+            # so the last actual last token the model produces per input element is
+            # different from the input sequence length
+
+            input_len += self.model.model.vision_tower.num_patches -1
+
+
+            # we want the good token to be really positive
+            # and we want the bad token to be really negative
+            loss = loss + \
+                    outputs.logits[batch_i, input_len-1, bad_token] \
+                    - outputs.logits[batch_i, input_len-1, good_token]
+
+        loss = loss / b
+
+        return loss, -loss

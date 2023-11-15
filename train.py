@@ -21,7 +21,7 @@ from artcritic.patched_sd_call import sd_patched_call
 from artcritic.prompts import DiffusionDBPromptUpscaled
 from artcritic.reward.dummy import DummyReward
 from artcritic.reward.hps import HPSReward
-from artcritic.reward.llava import LlavaReward
+from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -249,6 +249,8 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     
     if train_args.reward_type=='llava':
         reward_fn = LlavaReward(inference_dtype=inference_dtype, device=accelerator.device)
+    if train_args.reward_type=='llava-rater':
+        reward_fn = LlavaRewardSimpleRater(inference_dtype=inference_dtype, device=accelerator.device)
     elif train_args.reward_type == "dummy":
         reward_fn = DummyReward(inference_dtype=inference_dtype, device=accelerator.device)
     elif train_args.reward_type == "hps":
