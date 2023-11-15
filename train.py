@@ -1,15 +1,16 @@
 import contextlib
-from typing import Optional, Tuple
+from typing import Optional
 from diffusers.pipelines.latent_consistency_models import LatentConsistencyModelPipeline
 import torchvision
 from tqdm import tqdm
 import torch
+import accelerate
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from dataclasses import dataclass, asdict
 import wandb
-import random
+import bitsandbytes as bnb
 
 from diffusers import DiffusionPipeline, UNet2DConditionModel, StableDiffusionPipeline, LCMScheduler
 from diffusers.loaders import AttnProcsLayers
@@ -48,6 +49,11 @@ class TrainingArgs:
     adam_epsilon:float = 1e-8 
     # maximum gradient norm for gradient clipping.
     max_grad_norm:float = 1.0    
+
+    enable_paged_adamw_32bit:bool=True
+    enable_paged_adamw_8bit:bool=False
+    enable_adamw_8bit:bool=False
+
     lora_rank:int = 1
 
     max_n_batches:int = 10000
@@ -216,13 +222,22 @@ def main(train_args: TrainingArgs=TrainingArgs(),
 
     accelerator.register_save_state_pre_hook(save_model_hook)
 
-    optimizer = torch.optim.AdamW(
-        unet.parameters(),
-        lr=train_args.learning_rate,
-        betas=(train_args.adam_beta1, train_args.adam_beta2),
-        weight_decay=train_args.adam_weight_decay,
-        eps=train_args.adam_epsilon,
-    )
+    adam_args = dict(
+            params=unet.parameters(),
+            lr=train_args.learning_rate,
+            betas=(train_args.adam_beta1, train_args.adam_beta2),
+            weight_decay=train_args.adam_weight_decay,
+            eps=train_args.adam_epsilon,
+            )
+    if train_args.enable_paged_adamw_32bit:
+        optimizer = bnb.optim.PagedAdam32bit(**adam_args)
+    elif train_args.enable_paged_adamw_8bit:
+        optimizer = bnb.optim.PagedAdam8bit(**adam_args)
+    elif train_args.enable_adamw_8bit:
+        optimizer = bnb.optim.Adam8bit(**adam_args)
+    else:
+        optimizer = torch.optim.AdamW(**adam_args)
+
 
     train_prompter = DiffusionDBPromptUpscaled(seed=train_args.seed, split='train')
 
@@ -230,7 +245,6 @@ def main(train_args: TrainingArgs=TrainingArgs(),
 
     autocast = contextlib.nullcontext
     
-    # Prepare everything with our `accelerator`.
     unet, optimizer = accelerator.prepare(unet, optimizer)
     
     if train_args.reward_type=='llava':
@@ -302,7 +316,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                     optimizer.step()
                     optimizer.zero_grad()                        
 
-        if (i+1) % train_args.log_images_every == 0 or (i==0):
+        if (i+1) % train_args.log_images_every == 0:
             train_images = []
             for j, image in enumerate(ims):
                 image = image.clamp(0,1).cpu().detach()

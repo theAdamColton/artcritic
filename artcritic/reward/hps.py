@@ -1,4 +1,5 @@
 import torch
+from torch.nn import functional as F
 from transformers import CLIPModel, CLIPProcessor
 import torchvision
 
@@ -23,7 +24,9 @@ class HPSReward(Reward):
                                                     std=[0.26862954, 0.26130258, 0.27577711])
         
     def __call__(self, im_pix, prompts, prompts_detailed):    
-        x_var = torchvision.transforms.Resize(self.target_size, antialias=True)(im_pix)
+
+        to_h, to_w = self.target_size, self.target_size
+        x_var = F.interpolate(im_pix, (to_h, to_w), antialias=False, mode='nearest')
         x_var = self.normalize(x_var).to(im_pix.dtype)
         text_inputs = self.processor(text=prompts, return_tensors="pt", padding='max_length', truncation=True)
         text_inputs = {k:v.to(self.device) for k,v in text_inputs.items()}

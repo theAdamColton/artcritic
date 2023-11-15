@@ -1,4 +1,7 @@
+from torch.nn import functional as F
 from typing import List
+from llava.model.builder import load_pretrained_model
+from torchvision.transforms import InterpolationMode
 from transformers import BitsAndBytesConfig, DataCollatorForLanguageModeling,DataCollatorForSeq2Seq, AutoTokenizer, DataCollatorWithPadding
 from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 import torch
@@ -23,41 +26,26 @@ def _clip_vision_tower_forward(self_vision_tower, images):
         image_forward_outs = self_vision_tower.vision_tower(images.to(device=self_vision_tower.device, dtype=self_vision_tower.dtype), output_hidden_states=True)
         image_features = self_vision_tower.feature_select(image_forward_outs).to(images.dtype)
 
-    print("_clip_vision_tower_forward called")
     return image_features
 
 class LlavaReward(Reward):
     def __init__(self,
         inference_dtype=torch.float16,
                  device='cuda',
-        model_path = "liuhaotian/llava-v1.5-13b",
-                 max_seq_len: int = 512,
+                 model_path ="liuhaotian/llava-v1.5-7b",
+                 max_seq_len: int = 256,
                  torch_compile=False,
                      ):
         print("LOADING LLAVA MODEL")
 
-        bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=inference_dtype,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type='nf4',
-                llm_int8_enable_fp32_cpu_offload=True,
-                load_in_8bit_fp32_cpu_offload=True,
-            )
 
-
-        # put everything on gpu, but specify max_memory, which should automate offloading
-        # TODO try to have auto device map
-        device_map = {"":0,}
-        model:LlavaLlamaForCausalLM = LlavaLlamaForCausalLM.from_pretrained(model_path, quantization_config=bnb_config, torch_dtype=torch.float16, device_map=device_map, max_memory={0:'6GB', "cpu": "24GB"},)
-        #model:LlavaLlamaForCausalLM = LlavaLlamaForCausalLM.from_pretrained(model_path, torch_dtype=inference_dtype, device_map="auto", max_memory={0:'1GB', "cpu": "24GB"}, offload_folder="/tmp/huggingface/")
+        tokenizer, model, image_processor, context_len = load_pretrained_model(model_path=model_path, model_base = None, model_name=model_path.split("/")[-1], load_4bit=True)
 
         model = model.eval()
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model = model
+        self.image_processor = image_processor
 
-        model.get_vision_tower().load_model()
-        self.image_processor = model.get_vision_tower().image_processor
 
         for mod in model.modules():
             mod.requires_grad_(False)
@@ -83,7 +71,7 @@ class LlavaReward(Reward):
         else:
             conv_mode = "llava_v0"
 
-        self.max_seq_len = max_seq_len
+        self.max_seq_len = min(max_seq_len, context_len)
 
         for p in model.parameters():
             p.requires_grad_(False)
@@ -91,7 +79,7 @@ class LlavaReward(Reward):
         self.model = model
         self.tokenizer = tokenizer
         self.conv_template = llava_conv_templates[conv_mode].copy()
-        self.captioning_prompt = "Provide a detailed caption for the following image. Describe all of the objects in the image in painstaking detail."
+        self.captioning_prompt = "Describe this image in detail. It is a work in an art installation, and you are a art critic. Describe the composition, colors, and salient items that are portrayed."
         self.device = device
         self.dtype = inference_dtype
 
@@ -147,7 +135,9 @@ class LlavaReward(Reward):
 
         outputs = self.model(images=pixel_values, return_dict=True, **model_inputs)
 
-        return outputs.loss, -outputs.loss
+        loss = outputs.loss
+
+        return loss, -loss
 
 
     def _process_image_pixels(self,x: torch.Tensor):
@@ -157,13 +147,13 @@ class LlavaReward(Reward):
         """
         #x = ((x / 2) + 0.5).clamp(0, 1) 
         to_h, to_w = self.image_processor.crop_size['height'], self.image_processor.crop_size['width']
-        x= torchvision.transforms.Resize((to_h, to_w), antialias=True)(x)
+        x = F.interpolate(x, (to_h, to_w), antialias=False, mode='nearest')
 
         # normalizes
-        image_mean = self.image_processor.image_mean
-        image_std = self.image_processor.image_std
+        mean = self.image_processor.image_mean
+        std = self.image_processor.image_std
 
-        x = torchvision.transforms.functional.normalize(x, image_mean, image_std)
+        x = torchvision.transforms.Normalize(mean=mean, std=std)(x)
 
         return x
 

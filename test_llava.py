@@ -7,14 +7,14 @@ from transformers import TextStreamer
 from PIL import Image
 import torch
 
-model_path = "liuhaotian/llava-v1.5-13b"
+model_path = "teowu/llava_v1.5_7b_qinstruct_preview_v0.1"
 model_name = get_model_name_from_path(model_path)
 
 device='cuda'
 
 tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, model_base=None, model_name=model_name, load_4bit=True, device=device)
 
-image = Image.open("./images/saltmeme.jpg")
+image = Image.open("./images/ladyai.png")
 
 pixel_values = process_images([image], image_processor, model.config)
 if type(pixel_values) is list:
@@ -22,7 +22,7 @@ if type(pixel_values) is list:
 else:
     pixel_values = pixel_values.to(model.device, dtype=torch.float16)
 
-inp = "Describe this image in detail. Explain why it is funny. "
+inp = "Describe and evaluate the quality of the image. Also give an analysis of the content of the image, as if you were describing it to a blind person at an art exhibit."
 inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
 
 if 'llama-2' in model_name.lower():
