@@ -249,13 +249,13 @@ def main(train_args: TrainingArgs=TrainingArgs(),
     unet, optimizer = accelerator.prepare(unet, optimizer)
     
     if train_args.reward_type=='llava':
-        reward_fn = LlavaReward(inference_dtype=inference_dtype, device=accelerator.device)
+        rewarder = LlavaReward(inference_dtype=inference_dtype, device=accelerator.device)
     if train_args.reward_type=='llava-rater':
-        reward_fn = LlavaRewardSimpleRater(inference_dtype=inference_dtype, device=accelerator.device)
+        rewarder = LlavaRewardSimpleRater(inference_dtype=inference_dtype, device=accelerator.device)
     elif train_args.reward_type == "dummy":
-        reward_fn = DummyReward(inference_dtype=inference_dtype, device=accelerator.device)
+        rewarder = DummyReward(inference_dtype=inference_dtype, device=accelerator.device)
     elif train_args.reward_type == "hps":
-        reward_fn = HPSReward(inference_dtype=inference_dtype, device=accelerator.device)
+        rewarder = HPSReward(inference_dtype=inference_dtype, device=accelerator.device)
     else:
         raise NotImplementedError
 
@@ -295,9 +295,9 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                 train_prompter() for _ in range(train_args.batch_size)
             ]
 
-        train_prompts = [x[0]['prompt_original'] for x in train_prompt_batch]
+        train_prompts = [x['prompt'] for x in train_prompt_batch]
         train_prompts = [p.strip().replace("\"","") for p in train_prompts]
-        train_prompts_upscaled = [x[0]['prompt_upscaled'] for x in train_prompt_batch]
+        train_prompts_upscaled = [x['prompt_upscaled'] for x in train_prompt_batch]
         train_prompts_upscaled = [p.strip().replace("\"","") for p in train_prompts_upscaled]
 
         with accelerator.accumulate(unet):
@@ -305,7 +305,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                 with torch.enable_grad(): # important b/c don't have on by default in module                        
                     ims = patched_call(pipeline, train_prompts, output_type="pt", guidance_scale=model_args.sd_guidance_scale, num_inference_steps=model_args.model_steps, use_gradient_checkpointing=train_args.grad_checkpoint, generator=generator).images
 
-                    loss, reward = reward_fn(ims, train_prompts, train_prompts_upscaled)
+                    loss, reward = rewarder(ims, train_prompt_batch)
 
                     losses_to_log += loss.item()
                     
@@ -339,7 +339,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
         if ((i+1) % train_args.eval_every == 0) or (i==0) or (i==train_args.max_n_batches-1):
             print("running eval...")
             eval_prompt_batch = eval_prompter.ds[:train_args.eval_batch_size]
-            eval_prompts = eval_prompt_batch['prompt_original']
+            eval_prompts = eval_prompt_batch['prompt']
             eval_prompts = [p.strip().replace("\"","") for p in eval_prompts]
             eval_prompts_upscaled = eval_prompt_batch['prompt_upscaled']
             eval_prompts_upscaled = [p.strip().replace("\"","") for p in eval_prompts_upscaled]
@@ -353,7 +353,7 @@ def main(train_args: TrainingArgs=TrainingArgs(),
                                use_gradient_checkpointing=train_args.grad_checkpoint,
                                generator=eval_generator,
                                ).images
-                loss, reward = reward_fn(ims, eval_prompts, eval_prompts_upscaled)
+                loss, reward = rewarder(ims, eval_prompts, eval_prompts_upscaled)
             train_images = []
             for j, image in enumerate(ims):
                 image = image.clamp(0,1).cpu().detach()

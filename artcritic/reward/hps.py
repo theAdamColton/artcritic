@@ -23,7 +23,7 @@ class HPSReward(Reward):
         self.normalize = torchvision.transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
                                                     std=[0.26862954, 0.26130258, 0.27577711])
         
-    def __call__(self, im_pix, prompts, prompts_detailed):    
+    def __call__(self, im_pix, batched_prompt_d):    
 
         to_h, to_w = self.target_size, self.target_size
         x_var = F.interpolate(im_pix, (to_h, to_w), antialias=False, mode='nearest')

@@ -1,3 +1,4 @@
+import random
 from torch.nn import functional as F
 from typing import Dict, List
 from llava.model.builder import load_pretrained_model
@@ -116,7 +117,7 @@ class LlavaReward(Reward):
 
         return input_ids, labels
 
-    def __call__(self, pixel_values: torch.Tensor, prompts, detailed_captions: List[str], ):
+    def __call__(self, pixel_values: torch.Tensor, batched_prompt_d):
         pixel_values = self._process_image_pixels(pixel_values).to(self.device).to(self.dtype)
 
         batched_input_ids = []
@@ -170,13 +171,14 @@ class LlavaRewardSimpleRater(LlavaReward):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def __call__(self, pixel_values: torch.Tensor, captions, detailed_captions: List[str], ):
+    def __call__(self, pixel_values: torch.Tensor, batched_prompt_d):
         pixel_values = self._process_image_pixels(pixel_values).to(self.device).to(self.dtype)
 
         b = pixel_values.shape[0]
 
         batched_input_ids = []
-        for cap in captions:
+        for prompt_d in batched_prompt_d:
+            cap = prompt_d['prompt']
             inp = f"This AI generated image is generated from the prompt, '{cap[:150]}'. The AI generator might not have completely adhered to all of the details in the prompt, in which case it is a poor image. If the quality is good, and the generated image correctly corresponds with the user's instruction prompt, then the rating should be \"Good\"."
             inp = inp + "\nRate the quality of the image as either \"Poor\" or \"Good\"."
             inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
@@ -226,7 +228,7 @@ class LlavaRewardSimpleRater(LlavaReward):
 
 
 class LlavaRewardSimpleRater(LlavaReward):
-    def __call__(self, pixel_values: torch.Tensor, batched_prompt_d: List[Dict]):
+    def __call__(self, pixel_values: torch.Tensor, batched_prompt_d: List[Dict],):
         pixel_values = self._process_image_pixels(pixel_values).to(self.device).to(self.dtype)
 
         batched_input_ids = []
@@ -234,30 +236,33 @@ class LlavaRewardSimpleRater(LlavaReward):
         for prompt_d in batched_prompt_d:
             questions = prompt_d['prompt_qa_questions']
             answers = prompt_d['prompt_qa_answers']
-            options = prompt_d['prompt_qa_options']
+            all_options = prompt_d['prompt_qa_options']
 
-            # does all the questions
-            # maybe this should be changed to be a random question
-            for q,a,opts in zip(questions, answers, options):
-                inp = f"{q}\nAnswer with the option’s letter from the given choices directly.\n{opts}"
-                inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
-                conv = self.conv_template.copy()
-                conv.append_message(conv.roles[0], inp)
-                conv.append_message(conv.roles[1], None)
-                prompt = conv.get_prompt()
-                input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').to(self.device)
-                batched_input_ids.append({'input_ids':input_ids})
-                answer_id = self.tokenizer(a, add_special_tokens=False,)['input_ids'][0]
-                answer_ids.append(answer_id)
 
-        b = len(batched_input_ids)
+            # picks a random question
+            len_q = len(questions)
+            q_i = random.randint(0, len_q-1)
+
+            question, answer, options = questions[q_i], answers[q_i], all_options[q_i]
+
+            inp = f"{question}\nAnswer with the option’s letter from the given choices directly.\n{options}"
+            inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
+            conv = self.conv_template.copy()
+            conv.append_message(conv.roles[0], inp)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
+            input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').to(self.device)
+            batched_input_ids.append({'input_ids':input_ids})
+            answer_id = self.tokenizer(answer, add_special_tokens=False,)['input_ids'][0]
+            answer_ids.append(answer_id)
 
         model_inputs = self.collator(batched_input_ids)
         model_inputs = {k:v.to(self.device) for k,v in model_inputs.items()}
         outputs = self.model(images=pixel_values, return_dict=True, **model_inputs)
+        logits = outputs.logits
 
         loss = 0.0
-        for batch_i, (input_ids, answer_id) in enumerate(zip(batched_input_ids, answer_ids)):
+        for i, (input_ids, answer_id) in enumerate(zip(batched_input_ids, answer_ids)):
             last_token_i = len(input_ids['input_ids'])
 
             # LLaVA adds visual tokens corresponding to the number of ViT
@@ -268,11 +273,11 @@ class LlavaRewardSimpleRater(LlavaReward):
 
             last_token_i += self.model.model.vision_tower.num_patches -1 - 1
 
-
             # we want the answer token to be really positive
             # and we want the bad token to be really negative
-            reward = outputs.logits[batch_i, last_token_i, answer_id]
+            reward = logits[i, last_token_i, answer_id]
             loss = loss - reward
 
-        loss = loss / b
+        loss = loss / pixel_values.shape[0]
+        return loss, -loss
 

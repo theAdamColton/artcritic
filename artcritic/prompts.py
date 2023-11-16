@@ -6,4 +6,11 @@ class DiffusionDBPromptUpscaled():
         self.iter = iter(self.ds)
 
     def __call__(self):
-        return next(self.iter), {}
+        # returns a dict with keys:
+        # prompt
+        # prompt_upscaled
+        # prompt_qa_plan 
+        # prompt_qa_options 
+        # prompt_qa_answers
+        # prompt_qa_questions
+        return next(self.iter)

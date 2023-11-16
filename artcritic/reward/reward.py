@@ -1,6 +1,6 @@
-from typing import Tuple
+from typing import Dict, List, Tuple
 import torch
 
 class Reward:
-    def __call__(self, images, prompts, prompts_detailed) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, images, batched_prompt_d: List[Dict]) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
