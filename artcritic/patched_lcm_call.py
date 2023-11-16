@@ -28,8 +28,7 @@ def lcm_patched_call(
     clip_skip: Optional[int] = None,
     callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
     callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-
-    use_gradient_checkpointing:Optional[bool] = None,
+    use_gradient_checkpointing: Optional[bool] = None,
     **kwargs,
 ):
     r"""
@@ -120,7 +119,14 @@ def lcm_patched_call(
     width = width or self.unet.config.sample_size * self.vae_scale_factor
 
     # 1. Check inputs. Raise error if not correct
-    self.check_inputs(prompt, height, width, callback_steps, prompt_embeds, callback_on_step_end_tensor_inputs)
+    self.check_inputs(
+        prompt,
+        height,
+        width,
+        callback_steps,
+        prompt_embeds,
+        callback_on_step_end_tensor_inputs,
+    )
     self._guidance_scale = guidance_scale
     self._clip_skip = clip_skip
     self._cross_attention_kwargs = cross_attention_kwargs
@@ -138,7 +144,9 @@ def lcm_patched_call(
 
     # 3. Encode input prompt
     lora_scale = (
-        self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
+        self.cross_attention_kwargs.get("scale", None)
+        if self.cross_attention_kwargs is not None
+        else None
     )
 
     # NOTE: when a LCM is distilled from an LDM via latent consistency distillation (Algorithm 1) with guided
@@ -157,7 +165,9 @@ def lcm_patched_call(
     )
 
     # 4. Prepare timesteps
-    self.scheduler.set_timesteps(num_inference_steps, device, original_inference_steps=original_inference_steps)
+    self.scheduler.set_timesteps(
+        num_inference_steps, device, original_inference_steps=original_inference_steps
+    )
     timesteps = self.scheduler.timesteps
 
     # 5. Prepare latent variable
@@ -179,9 +189,9 @@ def lcm_patched_call(
     # CFG formulation, so we need to subtract 1 from the input guidance_scale.
     # LCM CFG formulation:  cfg_noise = noise_cond + cfg_scale * (noise_cond - noise_uncond), (cfg_scale > 0.0 using CFG)
     w = torch.tensor(self.guidance_scale - 1).repeat(bs)
-    w_embedding = self.get_guidance_scale_embedding(w, embedding_dim=self.unet.config.time_cond_proj_dim).to(
-        device=device, dtype=latents.dtype
-    )
+    w_embedding = self.get_guidance_scale_embedding(
+        w, embedding_dim=self.unet.config.time_cond_proj_dim
+    ).to(device=device, dtype=latents.dtype)
 
     # 7. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
     extra_step_kwargs = self.prepare_extra_step_kwargs(generator, None)
@@ -197,16 +207,16 @@ def lcm_patched_call(
             # use checkpointing
             if use_gradient_checkpointing:
                 model_pred = checkpoint.checkpoint(
-                        lambda kwargs: self.unet(**kwargs),
-                        {
-                            "sample":latents,
-                            "timestep": t,
-                            "encoder_hidden_states": prompt_embeds,
-                            "cross_attention_kwargs": self.cross_attention_kwargs,
-                            "return_dict": False,
-                         },
-                        use_reentrant=False
-                        )[0]
+                    lambda kwargs: self.unet(**kwargs),
+                    {
+                        "sample": latents,
+                        "timestep": t,
+                        "encoder_hidden_states": prompt_embeds,
+                        "cross_attention_kwargs": self.cross_attention_kwargs,
+                        "return_dict": False,
+                    },
+                    use_reentrant=False,
+                )[0]
             else:
                 model_pred = self.unet(
                     latents,
@@ -218,7 +228,9 @@ def lcm_patched_call(
                 )[0]
 
             # compute the previous noisy sample x_t -> x_t-1
-            latents, denoised = self.scheduler.step(model_pred, t, latents, **extra_step_kwargs, return_dict=False)
+            latents, denoised = self.scheduler.step(
+                model_pred, t, latents, **extra_step_kwargs, return_dict=False
+            )
             if callback_on_step_end is not None:
                 callback_kwargs = {}
                 for k in callback_on_step_end_tensor_inputs:
@@ -231,7 +243,9 @@ def lcm_patched_call(
                 denoised = callback_outputs.pop("denoised", denoised)
 
             # call the callback, if provided
-            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+            if i == len(timesteps) - 1 or (
+                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+            ):
                 progress_bar.update()
                 if callback is not None and i % callback_steps == 0:
                     step_idx = i // getattr(self.scheduler, "order", 1)
@@ -239,8 +253,12 @@ def lcm_patched_call(
 
     denoised = denoised.to(prompt_embeds.dtype)
     if not output_type == "latent":
-        image = self.vae.decode(denoised / self.vae.config.scaling_factor, return_dict=False)[0]
-        image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+        image = self.vae.decode(
+            denoised / self.vae.config.scaling_factor, return_dict=False
+        )[0]
+        image, has_nsfw_concept = self.run_safety_checker(
+            image, device, prompt_embeds.dtype
+        )
     else:
         image = denoised
         has_nsfw_concept = None
@@ -250,7 +268,9 @@ def lcm_patched_call(
     else:
         do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-    image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+    image = self.image_processor.postprocess(
+        image, output_type=output_type, do_denormalize=do_denormalize
+    )
 
     # Offload all models
     self.maybe_free_model_hooks()
@@ -258,4 +278,6 @@ def lcm_patched_call(
     if not return_dict:
         return (image, has_nsfw_concept)
 
-    return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    return StableDiffusionPipelineOutput(
+        images=image, nsfw_content_detected=has_nsfw_concept
+    )

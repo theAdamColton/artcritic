@@ -7,7 +7,6 @@ from typing import Union, List, Optional, Callable, Dict, Any
 import torch
 
 
-
 # modified from
 # https://github.com/huggingface/diffusers/blob/8789d0b6c7eed14e1f751022e74bdb0670f0e1b4/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py#L637
 # but uses grad checkpointing
@@ -33,8 +32,7 @@ def sd_patched_call(
     clip_skip: Optional[int] = None,
     callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
     callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-
-    use_gradient_checkpointing:Optional[bool] = None,
+    use_gradient_checkpointing: Optional[bool] = None,
     **kwargs,
 ):
     r"""
@@ -159,7 +157,9 @@ def sd_patched_call(
 
     # 3. Encode input prompt
     lora_scale = (
-        self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
+        self.cross_attention_kwargs.get("scale", None)
+        if self.cross_attention_kwargs is not None
+        else None
     )
 
     prompt_embeds, negative_prompt_embeds = self.encode_prompt(
@@ -205,42 +205,52 @@ def sd_patched_call(
     with self.progress_bar(total=num_inference_steps) as progress_bar:
         for i, t in enumerate(timesteps):
             # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+            latent_model_input = (
+                torch.cat([latents] * 2)
+                if self.do_classifier_free_guidance
+                else latents
+            )
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
             # predict the noise residual
             if use_gradient_checkpointing:
                 noise_pred = checkpoint.checkpoint(
-                        lambda kwargs: self.unet(**kwargs),
-                        {
-                            "sample":latent_model_input,
-                            "timestep": t,
-                            "encoder_hidden_states": prompt_embeds,
-                            "cross_attention_kwargs": self.cross_attention_kwargs,
-                            "return_dict": False,
-                         },
-                        use_reentrant=False
-                        )[0]
+                    lambda kwargs: self.unet(**kwargs),
+                    {
+                        "sample": latent_model_input,
+                        "timestep": t,
+                        "encoder_hidden_states": prompt_embeds,
+                        "cross_attention_kwargs": self.cross_attention_kwargs,
+                        "return_dict": False,
+                    },
+                    use_reentrant=False,
+                )[0]
             else:
                 noise_pred = self.unet(
-                latent_model_input,
-                t,
-                encoder_hidden_states=prompt_embeds,
-                cross_attention_kwargs=self.cross_attention_kwargs,
-                return_dict=False,
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=prompt_embeds,
+                    cross_attention_kwargs=self.cross_attention_kwargs,
+                    return_dict=False,
                 )[0]
 
             # perform guidance
             if self.do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                noise_pred = noise_pred_uncond + self.guidance_scale * (
+                    noise_pred_text - noise_pred_uncond
+                )
 
             if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
                 # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+                noise_pred = rescale_noise_cfg(
+                    noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale
+                )
 
             # compute the previous noisy sample x_t -> x_t-1
-            latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+            latents = self.scheduler.step(
+                noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+            )[0]
 
             if callback_on_step_end is not None:
                 callback_kwargs = {}
@@ -250,18 +260,26 @@ def sd_patched_call(
 
                 latents = callback_outputs.pop("latents", latents)
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                negative_prompt_embeds = callback_outputs.pop(
+                    "negative_prompt_embeds", negative_prompt_embeds
+                )
 
             # call the callback, if provided
-            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+            if i == len(timesteps) - 1 or (
+                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+            ):
                 progress_bar.update()
                 if callback is not None and i % callback_steps == 0:
                     step_idx = i // getattr(self.scheduler, "order", 1)
                     callback(step_idx, t, latents)
 
     if not output_type == "latent":
-        image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
-        image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+        image = self.vae.decode(
+            latents / self.vae.config.scaling_factor, return_dict=False
+        )[0]
+        image, has_nsfw_concept = self.run_safety_checker(
+            image, device, prompt_embeds.dtype
+        )
     else:
         image = latents
         has_nsfw_concept = None
@@ -271,7 +289,9 @@ def sd_patched_call(
     else:
         do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-    image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+    image = self.image_processor.postprocess(
+        image, output_type=output_type, do_denormalize=do_denormalize
+    )
 
     # Offload all models
     self.maybe_free_model_hooks()
@@ -279,4 +299,6 @@ def sd_patched_call(
     if not return_dict:
         return (image, has_nsfw_concept)
 
-    return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    return StableDiffusionPipelineOutput(
+        images=image, nsfw_content_detected=has_nsfw_concept
+    )

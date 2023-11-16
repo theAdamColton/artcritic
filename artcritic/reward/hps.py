@@ -5,11 +5,11 @@ import torchvision
 
 from artcritic.reward.reward import Reward
 
+
 class HPSReward(Reward):
-    def __init__(self,
-                 inference_dtype=None, device=None):
-        print('loading hps clip')
-        model:CLIPModel=CLIPModel.from_pretrained("adams-story/HPSv2-hf")
+    def __init__(self, inference_dtype=None, device=None):
+        print("loading hps clip")
+        model: CLIPModel = CLIPModel.from_pretrained("adams-story/HPSv2-hf")
         self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
         model = model.to(device, dtype=inference_dtype)
         model.gradient_checkpointing_enable()
@@ -18,20 +18,23 @@ class HPSReward(Reward):
         model.eval()
 
         self.model = model
-        self.target_size =  224
+        self.target_size = 224
         self.device = device
-        self.normalize = torchvision.transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
-                                                    std=[0.26862954, 0.26130258, 0.27577711])
-        
-    def __call__(self, im_pix, batched_prompt_d):    
+        self.normalize = torchvision.transforms.Normalize(
+            mean=[0.48145466, 0.4578275, 0.40821073],
+            std=[0.26862954, 0.26130258, 0.27577711],
+        )
 
+    def __call__(self, im_pix, batched_prompt_d):
         to_h, to_w = self.target_size, self.target_size
-        x_var = F.interpolate(im_pix, (to_h, to_w), antialias=False, mode='nearest')
+        x_var = F.interpolate(im_pix, (to_h, to_w), antialias=False, mode="nearest")
         x_var = self.normalize(x_var).to(im_pix.dtype)
-        text_inputs = self.processor(text=prompts, return_tensors="pt", padding='max_length', truncation=True)
-        text_inputs = {k:v.to(self.device) for k,v in text_inputs.items()}
+        text_inputs = self.processor(
+            text=prompts, return_tensors="pt", padding="max_length", truncation=True
+        )
+        text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
 
-        image_embeds  = self.model.get_image_features(x_var)
+        image_embeds = self.model.get_image_features(x_var)
         text_embeds = self.model.get_text_features(**text_inputs)
         image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
@@ -41,5 +44,4 @@ class HPSReward(Reward):
 
         score = scores.mean()
 
-        return  -score, score
-    
+        return -score, score
