@@ -72,7 +72,8 @@ class TrainingArgs:
 @dataclass
 class ModelArgs:
     # base model to load. either a path to a local directory, or a model name from the HuggingFace model hub.
-    model_name_or_url:str = "Lykon/dreamshaper-7"
+    #model_name_or_url:str = "Lykon/dreamshaper-7"
+    model_name_or_url:str = "runwayml/stable-diffusion-v1-5"
 
     # name of lora model if any
     adapter_name_or_url: Optional[str] = "latent-consistency/lcm-lora-sdv1-5"

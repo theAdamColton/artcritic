@@ -1,7 +1,7 @@
 import datasets
 
 class DiffusionDBPromptUpscaled():
-    def __init__(self, seed, split='train'):
+    def __init__(self, seed=42, split='train'):
         self.ds = datasets.load_dataset("adams-story/diffusiondb-prompt-upscale")[split].shuffle(seed=seed)
         self.iter = iter(self.ds)
 
