@@ -1,3 +1,4 @@
+import numpy as np
 import random
 from torch.nn import functional as F
 from typing import Dict, List
@@ -211,9 +212,39 @@ class LlavaReward(Reward):
         return x
 
 
+def make_qa_prompt(d: dict):
+    question = d['question']
+    options = d['options']
+    n = len(options)
+    perm = np.random.permutation(n)
+    letters = [chr(ord("A") + x) for x in perm]
+
+    p = f'{question}'
+    p += '\nAnswer with the option’s letter from the given choices directly.\n'
+    for i in perm:
+        p += f"{letters[i]}. {options[i]}\n"
+
+    answer = letters[d['answer']]
+    return p, answer
+
 class LlavaRewardSimpleRater(LlavaReward):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.questions = [
+                {'question':"How is the overall clarity of this image?",
+                 'options': ['Sharp', 'Blurry', 'Smeary', 'Poor'],
+                 'answer': 0
+                 },
+                {'question':"What is the overall quality of this image?",
+                 'options': ['Good', 'Poor', 'Excellent', 'Ok'],
+                 'answer': 2
+                 },
+                {'question':"What is the overall quality of this image?",
+                 'options': ['Good', 'Poor', 'Excellent', 'Ok'],
+                 'answer': 2
+                 },
+            ]
 
     def __call__(self, pixel_values: torch.Tensor, batched_prompt_d):
         pixel_values = (
@@ -224,10 +255,11 @@ class LlavaRewardSimpleRater(LlavaReward):
 
         batched_input_ids = []
         for prompt_d in batched_prompt_d:
-            cap = prompt_d["prompt"]
-            inp = f"This AI generated image is generated from the prompt, '{cap[:150]}'. The AI generator might not have completely adhered to all of the details in the prompt, in which case it is a poor image. If the quality is good, and the generated image correctly corresponds with the user's instruction prompt, then the rating should be \"Good\"."
-            inp = inp + '\nRate the quality of the image as either "Poor" or "Good".'
-            inp = DEFAULT_IMAGE_TOKEN + "\n" + inp
+            # picks a random question
+            q = random.choice(self.questions)
+            question_prompt, answer = make_qa_prompt(q)
+
+            inp = DEFAULT_IMAGE_TOKEN + "\n" + question_prompt
             conv = self.conv_template.copy()
             conv.append_message(conv.roles[0], inp)
             conv.append_message(conv.roles[1], None)
@@ -273,7 +305,7 @@ class LlavaRewardSimpleRater(LlavaReward):
         return loss, -loss
 
 
-class LlavaRewardSimpleRater(LlavaReward):
+class LlavaQA(LlavaReward):
     def __call__(
         self,
         pixel_values: torch.Tensor,

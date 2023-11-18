@@ -18,7 +18,6 @@ class HPSReward(Reward):
         model.eval()
 
         self.model = model
-        self.target_size = 224
         self.device = device
         self.normalize = torchvision.transforms.Normalize(
             mean=[0.48145466, 0.4578275, 0.40821073],
@@ -26,9 +25,11 @@ class HPSReward(Reward):
         )
 
     def __call__(self, im_pix, batched_prompt_d):
-        to_h, to_w = self.target_size, self.target_size
+        to_h = self.processor.image_processor.crop_size['height']
+        to_w = self.processor.image_processor.crop_size['width']
         x_var = F.interpolate(im_pix, (to_h, to_w), antialias=False, mode="nearest")
         x_var = self.normalize(x_var).to(im_pix.dtype)
+        prompts = [ d['prompt'] for d in batched_prompt_d]
         text_inputs = self.processor(
             text=prompts, return_tensors="pt", padding="max_length", truncation=True
         )

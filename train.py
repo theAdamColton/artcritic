@@ -13,6 +13,7 @@ from dataclasses import dataclass, asdict
 import wandb
 import bitsandbytes as bnb
 
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from diffusers import (
     DiffusionPipeline,
     UNet2DConditionModel,
@@ -25,9 +26,9 @@ from artcritic.patched_lcm_call import lcm_patched_call
 from artcritic.patched_sd_call import sd_patched_call
 
 from artcritic.prompts import DiffusionDBPromptQA
+from artcritic.reward.cfn import CFNReward
 from artcritic.reward.dummy import DummyReward
 from artcritic.reward.hps import HPSReward
-from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -90,7 +91,7 @@ class ModelArgs:
     is_lcm: bool = True
 
     # revision of the model to load.
-    revision: str = "main"
+    revision: str = "fp16"
 
     model_steps: int = 4
 
@@ -102,7 +103,7 @@ class ModelArgs:
         model_args = self
         # load scheduler, tokenizer and models.
         pipeline = DiffusionPipeline.from_pretrained(
-            model_args.model_name_or_url, revision=model_args.revision
+            model_args.model_name_or_url, revision=model_args.revision, variant=model_args.variant
         )
         if model_args.is_lcm:
             pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
@@ -110,6 +111,7 @@ class ModelArgs:
         if model_args.adapter_name_or_url is not None:
             pipeline.load_lora_weights(model_args.adapter_name_or_url)
             pipeline.fuse_lora()
+            pipeline.unload_lora_weights()
 
         if model_args.adapter_name_or_url_2 is not None:
             pipeline.load_lora_weights(model_args.adapter_name_or_url_2)
@@ -123,7 +125,7 @@ class ModelArgs:
         if model_args.torch_compile:
             pipeline.unet = torch.compile(pipeline.unet)
 
-        pipeline.enable_xformers_memory_efficient_attention()
+        #pipeline.enable_xformers_memory_efficient_attention()
         # pipeline.enable_model_cpu_offload()
 
         # disable safety checker
@@ -186,62 +188,34 @@ def main(
     # Move unet, vae and text_encoder to device and cast to inference_dtype
     pipeline.vae.to(accelerator.device, dtype=inference_dtype)
     pipeline.text_encoder.to(accelerator.device, dtype=inference_dtype)
-
     pipeline.unet.to(accelerator.device, dtype=inference_dtype)
-    # Set correct lora layers
-    lora_attn_procs = {}
-    for name in pipeline.unet.attn_processors.keys():
-        cross_attention_dim = (
-            None
-            if name.endswith("attn1.processor")
-            else pipeline.unet.config.cross_attention_dim
-        )
-        if name.startswith("mid_block"):
-            hidden_size = pipeline.unet.config.block_out_channels[-1]
-        elif name.startswith("up_blocks"):
-            block_id = int(name[len("up_blocks.")])
-            hidden_size = list(reversed(pipeline.unet.config.block_out_channels))[
-                block_id
-            ]
-        elif name.startswith("down_blocks"):
-            block_id = int(name[len("down_blocks.")])
-            hidden_size = pipeline.unet.config.block_out_channels[block_id]
-        else:
-            raise ValueError(f"{name} not recognized")
 
-        lora_attn_procs[name] = LoRAAttnProcessor(
-            hidden_size=hidden_size,
-            cross_attention_dim=cross_attention_dim,
-            rank=train_args.lora_rank,
-        )
-    pipeline.unet.set_attn_processor(lora_attn_procs)
+    lora_config = LoraConfig(
+        r=train_args.lora_rank,
+        target_modules=[
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0",
+            "proj_in",
+            "proj_out",
+            "ff.net.0.proj",
+            "ff.net.2",
+            "conv1",
+            "conv2",
+            "conv_shortcut",
+            "downsamplers.0.conv",
+            "upsamplers.0.conv",
+            "time_emb_proj",
+        ],
+    )
+    pipeline.unet = get_peft_model(pipeline.unet, lora_config)
+    print("UNET  ", end="")
+    pipeline.unet.print_trainable_parameters()
 
-    # this is a hack to synchronize gradients properly. the module that registers the parameters we care about (in
-    # this case, AttnProcsLayers) needs to also be used for the forward pass. AttnProcsLayers doesn't have a
-    # `forward` method, so we wrap it to add one and capture the rest of the unet parameters using a closure.
-    class _Wrapper(AttnProcsLayers):
-        def forward(self, *args, **kwargs):
-            return pipeline.unet(*args, **kwargs)
-
-    unet = _Wrapper(pipeline.unet.attn_processors)
-
-    # set up diffusers-friendly checkpoint saving with Accelerate
-
-    def save_model_hook(models, weights, output_dir):
-        output_splits = output_dir.split("/")
-        output_splits[1] = wandb.run.name
-        output_dir = "/".join(output_splits)
-        assert len(models) == 1
-        if isinstance(models[0], AttnProcsLayers):
-            pipeline.unet.save_attn_procs(output_dir)
-        else:
-            raise ValueError(f"Unknown model type {type(models[0])}")
-        weights.pop()  # ensures that accelerate doesn't try to handle saving of the model
-
-    accelerator.register_save_state_pre_hook(save_model_hook)
 
     adam_args = dict(
-        params=unet.parameters(),
+        params=pipeline.unet.parameters(),
         lr=train_args.learning_rate,
         betas=(train_args.adam_beta1, train_args.adam_beta2),
         weight_decay=train_args.adam_weight_decay,
@@ -260,15 +234,20 @@ def main(
 
     eval_prompter = DiffusionDBPromptQA(seed=train_args.seed + 1, split="test")
 
-    autocast = contextlib.nullcontext
-
-    unet, optimizer = accelerator.prepare(unet, optimizer)
+    pipeline.unet, optimizer = accelerator.prepare(pipeline.unet, optimizer)
 
     if train_args.reward_type == "llava":
+        from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater, LlavaQA
         rewarder = LlavaReward(
             inference_dtype=inference_dtype, device=accelerator.device
         )
-    if train_args.reward_type == "llava-rater":
+    elif train_args.reward_type == "llava-qa":
+        from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater, LlavaQA
+        rewarder = LlavaQA(
+            inference_dtype=inference_dtype, device=accelerator.device
+        )
+    elif train_args.reward_type == "llava-rater":
+        from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater, LlavaQA
         rewarder = LlavaRewardSimpleRater(
             inference_dtype=inference_dtype, device=accelerator.device
         )
@@ -278,27 +257,10 @@ def main(
         )
     elif train_args.reward_type == "hps":
         rewarder = HPSReward(inference_dtype=inference_dtype, device=accelerator.device)
+    elif train_args.reward_type == "cfn":
+        rewarder = CFNReward(inference_dtype=inference_dtype, device=accelerator.device)
     else:
         raise NotImplementedError
-
-    def load_model_hook(models, input_dir):
-        assert len(models) == 1
-        if isinstance(models[0], AttnProcsLayers):
-            tmp_unet = UNet2DConditionModel.from_pretrained(
-                model_args.model_name_or_url,
-                revision=model_args.revision,
-                subfolder="unet",
-            )
-            tmp_unet.load_attn_procs(input_dir)
-            models[0].load_state_dict(
-                AttnProcsLayers(tmp_unet.attn_processors).state_dict()
-            )
-            del tmp_unet
-        else:
-            raise ValueError(f"Unknown model type {type(models[0])}")
-        models.pop()  # ensures that accelerate doesn't try to handle loading of the model
-
-    accelerator.register_load_state_pre_hook(load_model_hook)
 
     if train_args.resume_from:
         logger.info(f"Resuming from {train_args.resume_from}")
@@ -308,7 +270,7 @@ def main(
 
     losses_to_log = 0.0
 
-    unet.train()
+    pipeline.unet.train()
 
     eval_prompt_batch = [eval_prompter.ds[i] for i in range(train_args.eval_batch_size)]
     eval_prompts = [x["prompt"] for x in eval_prompt_batch]
@@ -330,34 +292,34 @@ def main(
             p.strip().replace('"', "") for p in train_prompts_upscaled
         ]
 
-        with accelerator.accumulate(unet):
-            with autocast():
-                with torch.enable_grad():  # important b/c don't have on by default in module
-                    ims = patched_call(
-                        pipeline,
-                        train_prompts,
-                        output_type="pt",
-                        guidance_scale=model_args.sd_guidance_scale,
-                        num_inference_steps=model_args.model_steps,
-                        use_gradient_checkpointing=train_args.grad_checkpoint,
-                        generator=generator,
-                    ).images
+        with accelerator.accumulate(pipeline.unet):
+            with torch.enable_grad():  # important b/c don't have on by default in module
+                ims = patched_call(
+                    pipeline,
+                    train_prompts,
+                    output_type="pt",
+                    guidance_scale=model_args.sd_guidance_scale,
+                    num_inference_steps=model_args.model_steps,
+                    use_gradient_checkpointing=train_args.grad_checkpoint,
+                    generator=generator,
+                ).images
 
-                    loss, reward = rewarder(ims, train_prompt_batch)
 
-                    losses_to_log += loss.item()
+                loss, reward = rewarder(ims, train_prompt_batch)
 
-                    logger.info(f"loss {loss.item():.4f}")
+                losses_to_log += loss.item()
 
-                    # backward pass
-                    accelerator.backward(loss)
-                    if accelerator.sync_gradients:
-                        accelerator.clip_grad_norm_(
-                            unet.parameters(), train_args.max_grad_norm
-                        )
+                logger.info(f"loss {loss.item():.4f}")
 
-                    optimizer.step()
-                    optimizer.zero_grad()
+                # backward pass
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(
+                        pipeline.unet.parameters(), train_args.max_grad_norm
+                    )
+
+                optimizer.step()
+                optimizer.zero_grad()
 
         if (i + 1) % train_args.log_images_every == 0:
             train_images = []
