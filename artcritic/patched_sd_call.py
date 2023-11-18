@@ -220,7 +220,9 @@ def sd_patched_call(
                 },
                 use_reentrant=False,
             )[0]
-            assert noise_pred.grad_fn is not None
+            noise_pred = noise_pred.to(self.unet.dtype)
+            if self.unet.training:
+                assert noise_pred.grad_fn is not None
 
             # perform guidance
             if self.do_classifier_free_guidance:

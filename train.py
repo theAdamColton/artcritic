@@ -1,3 +1,4 @@
+import os
 import random
 import contextlib
 from typing import Optional
@@ -5,10 +6,6 @@ from diffusers.pipelines.latent_consistency_models import LatentConsistencyModel
 import torchvision
 from tqdm import tqdm
 import torch
-import accelerate
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed
 from dataclasses import dataclass, asdict
 import wandb
 import bitsandbytes as bnb
@@ -19,6 +16,7 @@ from diffusers import (
     UNet2DConditionModel,
     StableDiffusionPipeline,
     LCMScheduler,
+    AutoencoderKL,
 )
 from diffusers.loaders import AttnProcsLayers
 from diffusers.models.attention_processor import LoRAAttnProcessor
@@ -31,16 +29,13 @@ from artcritic.reward.dummy import DummyReward
 from artcritic.reward.hps import HPSReward
 
 
-logger = get_logger(__name__, log_level="INFO")
-
 
 @dataclass
 class TrainingArgs:
-    save_freq: int = 500
-
     reward_type: str = "llava"
 
     precision: str = "fp16"
+    device:str = "cuda"
     seed: int = 42
 
     grad_checkpoint: bool = True
@@ -83,6 +78,8 @@ class ModelArgs:
     # model_name_or_url:str = "Lykon/dreamshaper-7"
     model_name_or_url: str = "runwayml/stable-diffusion-v1-5"
 
+    vae_model_name_or_url: str = ""#\madebyollin/sdxl-vae-fp16-fix"
+
     # name of lora model if any
     adapter_name_or_url: Optional[str] = "latent-consistency/lcm-lora-sdv1-5"
 
@@ -90,8 +87,7 @@ class ModelArgs:
 
     is_lcm: bool = True
 
-    # revision of the model to load.
-    revision: str = "fp16"
+    variant: str = "fp16"
 
     model_steps: int = 4
 
@@ -103,10 +99,14 @@ class ModelArgs:
         model_args = self
         # load scheduler, tokenizer and models.
         pipeline = DiffusionPipeline.from_pretrained(
-            model_args.model_name_or_url, revision=model_args.revision, variant=model_args.variant
+            model_args.model_name_or_url, variant=model_args.variant, torch_dtype=torch.float16,
         )
         if model_args.is_lcm:
             pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
+
+        if model_args.vae_model_name_or_url:
+            vae = AutoencoderKL.from_pretrained(model_args.vae_model_name_or_url)
+            pipeline.vae = vae
 
         if model_args.adapter_name_or_url is not None:
             pipeline.load_lora_weights(model_args.adapter_name_or_url)
@@ -148,24 +148,11 @@ def main(
 ):
     generator = torch.Generator().manual_seed(train_args.seed)
 
-    accelerator = Accelerator(
-        log_with="wandb",
-        mixed_precision=train_args.precision,
-        gradient_accumulation_steps=train_args.gradient_accumulation_steps,
-    )
-
     config_d = {"train_" + k: v for k, v in asdict(train_args).items()}
     config_d.update({"model_" + k: v for k, v in asdict(model_args).items()})
-    if accelerator.is_main_process:
-        accelerator.init_trackers(
-            project_name="align-prop",
-            config=config_d,
-        )
+    run = wandb.init(project='artcritic', config = config_d)
 
-    logger.info(f"\n{config_d}")
-
-    # set seed (device_specific is very important to get different prompts on different devices)
-    set_seed(train_args.seed, device_specific=True)
+    print(f"\n{config_d}")
 
     pipeline = model_args.load_model()
 
@@ -184,11 +171,6 @@ def main(
         inference_dtype = torch.bfloat16
     else:
         raise ValueError(train_args.precision)
-
-    # Move unet, vae and text_encoder to device and cast to inference_dtype
-    pipeline.vae.to(accelerator.device, dtype=inference_dtype)
-    pipeline.text_encoder.to(accelerator.device, dtype=inference_dtype)
-    pipeline.unet.to(accelerator.device, dtype=inference_dtype)
 
     lora_config = LoraConfig(
         r=train_args.lora_rank,
@@ -213,6 +195,10 @@ def main(
     print("UNET  ", end="")
     pipeline.unet.print_trainable_parameters()
 
+    # Move unet, vae and text_encoder to device and cast to inference_dtype
+    pipeline.vae.to(train_args.device, dtype=inference_dtype)
+    pipeline.text_encoder.to(train_args.device, dtype=inference_dtype)
+    pipeline.unet.to(train_args.device, dtype=inference_dtype)
 
     adam_args = dict(
         params=pipeline.unet.parameters(),
@@ -234,37 +220,31 @@ def main(
 
     eval_prompter = DiffusionDBPromptQA(seed=train_args.seed + 1, split="test")
 
-    pipeline.unet, optimizer = accelerator.prepare(pipeline.unet, optimizer)
-
     if train_args.reward_type == "llava":
         from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater, LlavaQA
         rewarder = LlavaReward(
-            inference_dtype=inference_dtype, device=accelerator.device
+            inference_dtype=inference_dtype, device=train_args.device
         )
     elif train_args.reward_type == "llava-qa":
         from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater, LlavaQA
         rewarder = LlavaQA(
-            inference_dtype=inference_dtype, device=accelerator.device
+            inference_dtype=inference_dtype, device=train_args.device
         )
     elif train_args.reward_type == "llava-rater":
         from artcritic.reward.llava import LlavaReward, LlavaRewardSimpleRater, LlavaQA
         rewarder = LlavaRewardSimpleRater(
-            inference_dtype=inference_dtype, device=accelerator.device
+            inference_dtype=inference_dtype, device=train_args.device
         )
     elif train_args.reward_type == "dummy":
         rewarder = DummyReward(
-            inference_dtype=inference_dtype, device=accelerator.device
+            inference_dtype=inference_dtype, device=train_args.device
         )
     elif train_args.reward_type == "hps":
-        rewarder = HPSReward(inference_dtype=inference_dtype, device=accelerator.device)
+        rewarder = HPSReward(inference_dtype=inference_dtype, device=train_args.device)
     elif train_args.reward_type == "cfn":
-        rewarder = CFNReward(inference_dtype=inference_dtype, device=accelerator.device)
+        rewarder = CFNReward(inference_dtype=inference_dtype, device=train_args.device)
     else:
         raise NotImplementedError
-
-    if train_args.resume_from:
-        logger.info(f"Resuming from {train_args.resume_from}")
-        accelerator.load_state(train_args.resume_from)
 
     first_epoch = 0
 
@@ -278,11 +258,9 @@ def main(
     eval_prompts_upscaled = [x["prompt_upscaled"] for x in eval_prompt_batch]
     eval_prompts_upscaled = [p.strip().replace('"', "") for p in eval_prompts_upscaled]
 
+
     #################### TRAINING ####################
     for i in tqdm(range(first_epoch, train_args.max_n_batches)):
-        if accelerator.is_main_process:
-            logger.info(f"{wandb.run.name} train_batch {i}: training")
-
         train_prompt_batch = [train_prompter() for _ in range(train_args.batch_size)]
 
         train_prompts = [x["prompt"] for x in train_prompt_batch]
@@ -292,32 +270,29 @@ def main(
             p.strip().replace('"', "") for p in train_prompts_upscaled
         ]
 
-        with accelerator.accumulate(pipeline.unet):
-            with torch.enable_grad():  # important b/c don't have on by default in module
-                ims = patched_call(
-                    pipeline,
-                    train_prompts,
-                    output_type="pt",
-                    guidance_scale=model_args.sd_guidance_scale,
-                    num_inference_steps=model_args.model_steps,
-                    use_gradient_checkpointing=train_args.grad_checkpoint,
-                    generator=generator,
-                ).images
+        with torch.enable_grad():  # important b/c don't have on by default in module
+            ims = patched_call(
+                pipeline,
+                train_prompts,
+                output_type="pt",
+                guidance_scale=model_args.sd_guidance_scale,
+                num_inference_steps=model_args.model_steps,
+                use_gradient_checkpointing=train_args.grad_checkpoint,
+                generator=generator,
+            ).images
 
 
-                loss, reward = rewarder(ims, train_prompt_batch)
+            loss, reward = rewarder(ims, train_prompt_batch)
 
-                losses_to_log += loss.item()
+            (loss/train_args.gradient_accumulation_steps).backward()
 
-                logger.info(f"loss {loss.item():.4f}")
+            torch.nn.utils.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
 
-                # backward pass
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(
-                        pipeline.unet.parameters(), train_args.max_grad_norm
-                    )
+            losses_to_log += loss.item()
 
+            print(f"loss {loss.item():.4f}")
+
+            if (i+1) % train_args.gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -333,7 +308,7 @@ def main(
                     )
                 )
 
-            accelerator.log(
+            wandb.log(
                 {
                     "train": {
                         "images": train_images,
@@ -345,9 +320,6 @@ def main(
 
             losses_to_log = 0.0
 
-        if (i + 1) % train_args.save_freq == 0 and accelerator.is_main_process:
-            accelerator.save_state("out/")
-
         if (
             ((i + 1) % train_args.eval_every == 0)
             or (i == 0)
@@ -357,15 +329,17 @@ def main(
 
             with torch.inference_mode():
                 eval_generator = torch.Generator().manual_seed(420)
-                ims = pipeline(
+                pipeline.unet.eval()
+                ims = patched_call(
+                    pipeline,
                     eval_prompts,
                     output_type="pt",
                     guidance_scale=model_args.sd_guidance_scale,
                     num_inference_steps=model_args.model_steps,
-                    use_gradient_checkpointing=train_args.grad_checkpoint,
                     generator=eval_generator,
                 ).images
                 loss, reward = rewarder(ims, eval_prompt_batch)
+                pipeline.unet.train()
             train_images = []
             for j, image in enumerate(ims):
                 image = image.clamp(0, 1).cpu().detach()
@@ -377,10 +351,15 @@ def main(
                     )
                 )
 
-            accelerator.log(
+            wandb.log(
                 {"test": {"images": train_images, "loss": loss}},
                 step=i,
             )
+
+
+    pipeline.unet.save_pretrained("./out/")
+    lora_state_dict = get_peft_model_state_dict(pipeline.unet)
+    StableDiffusionPipeline.save_lora_weights(os.path.join("./out/", "unet_lora/"), lora_state_dict)
 
 
 if __name__ == "__main__":
