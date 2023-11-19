@@ -1,7 +1,5 @@
 import os
-import random
-import contextlib
-from typing import Optional
+from typing import Optional, Tuple
 from diffusers.pipelines.latent_consistency_models import LatentConsistencyModelPipeline
 import torchvision
 from tqdm import tqdm
@@ -13,17 +11,16 @@ import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from diffusers import (
     DiffusionPipeline,
-    UNet2DConditionModel,
     StableDiffusionPipeline,
+    StableDiffusionXLPipeline,
     LCMScheduler,
     AutoencoderKL,
 )
-from diffusers.loaders import AttnProcsLayers
-from diffusers.models.attention_processor import LoRAAttnProcessor
 from artcritic.patched_lcm_call import lcm_patched_call
 from artcritic.patched_sd_call import sd_patched_call
+from artcritic import patched_sdxl_call
 
-from artcritic.prompts import DiffusionDBPromptQA
+from artcritic.prompts import DiffusionDBPromptQA, DiffusionDB
 from artcritic.reward.cfn import CFNReward
 from artcritic.reward.dummy import DummyReward
 from artcritic.reward.hps import HPSReward
@@ -59,7 +56,7 @@ class TrainingArgs:
 
     lora_rank: int = 1
 
-    max_n_batches: int = 10000
+    max_n_batches: int = 50000
     batch_size: int = 1
     gradient_accumulation_steps: int = 4
 
@@ -67,18 +64,22 @@ class TrainingArgs:
 
     log_images_every: int = 8
 
+    save_every: int = 1000
+
     eval_every: int = 8
 
     eval_batch_size: int = 4
+
+    image_height: int = 512
+    image_width:int = 512
 
 
 @dataclass
 class ModelArgs:
     # base model to load. either a path to a local directory, or a model name from the HuggingFace model hub.
-    # model_name_or_url:str = "Lykon/dreamshaper-7"
     model_name_or_url: str = "runwayml/stable-diffusion-v1-5"
 
-    vae_model_name_or_url: str = ""#\madebyollin/sdxl-vae-fp16-fix"
+    vae_model_name_or_url: str = ""#"madebyollin/sdxl-vae-fp16-fix"
 
     # name of lora model if any
     adapter_name_or_url: Optional[str] = "latent-consistency/lcm-lora-sdv1-5"
@@ -124,7 +125,13 @@ class ModelArgs:
 
         if model_args.torch_compile:
             pipeline.unet = torch.compile(pipeline.unet)
+            pipeline.vae = torch.compile(pipeline.vae)
 
+        pipeline.enable_vae_tiling()
+        pipeline.enable_attention_slicing()
+        pipeline.enable_vae_slicing()
+
+        # doesnt work with lora
         #pipeline.enable_xformers_memory_efficient_attention()
         # pipeline.enable_model_cpu_offload()
 
@@ -160,6 +167,8 @@ def main(
         patched_call = lcm_patched_call
     elif isinstance(pipeline, StableDiffusionPipeline):
         patched_call = sd_patched_call
+    elif isinstance(pipeline, StableDiffusionXLPipeline):
+        patched_call = patched_sdxl_call.patched_call
     else:
         raise ValueError(f"unrecognized pipeline class! {type(pipeline)}")
 
@@ -195,10 +204,7 @@ def main(
     print("UNET  ", end="")
     pipeline.unet.print_trainable_parameters()
 
-    # Move unet, vae and text_encoder to device and cast to inference_dtype
-    pipeline.vae.to(train_args.device, dtype=inference_dtype)
-    pipeline.text_encoder.to(train_args.device, dtype=inference_dtype)
-    pipeline.unet.to(train_args.device, dtype=inference_dtype)
+    pipeline = pipeline.to(inference_dtype).to(train_args.device)
 
     adam_args = dict(
         params=pipeline.unet.parameters(),
@@ -217,7 +223,6 @@ def main(
         optimizer = torch.optim.AdamW(**adam_args)
 
     train_prompter = DiffusionDBPromptQA(seed=train_args.seed, split="train")
-
     eval_prompter = DiffusionDBPromptQA(seed=train_args.seed + 1, split="test")
 
     if train_args.reward_type == "llava":
@@ -255,8 +260,6 @@ def main(
     eval_prompt_batch = [eval_prompter.ds[i] for i in range(train_args.eval_batch_size)]
     eval_prompts = [x["prompt"] for x in eval_prompt_batch]
     eval_prompts = [p.strip().replace('"', "") for p in eval_prompts]
-    eval_prompts_upscaled = [x["prompt_upscaled"] for x in eval_prompt_batch]
-    eval_prompts_upscaled = [p.strip().replace('"', "") for p in eval_prompts_upscaled]
 
 
     #################### TRAINING ####################
@@ -265,10 +268,6 @@ def main(
 
         train_prompts = [x["prompt"] for x in train_prompt_batch]
         train_prompts = [p.strip().replace('"', "") for p in train_prompts]
-        train_prompts_upscaled = [x["prompt_upscaled"] for x in train_prompt_batch]
-        train_prompts_upscaled = [
-            p.strip().replace('"', "") for p in train_prompts_upscaled
-        ]
 
         with torch.enable_grad():  # important b/c don't have on by default in module
             ims = patched_call(
@@ -279,8 +278,9 @@ def main(
                 num_inference_steps=model_args.model_steps,
                 use_gradient_checkpointing=train_args.grad_checkpoint,
                 generator=generator,
+                height = train_args.image_height,
+                width = train_args.image_width,
             ).images
-
 
             loss, reward = rewarder(ims, train_prompt_batch)
 
@@ -355,6 +355,12 @@ def main(
                 {"test": {"images": train_images, "loss": loss}},
                 step=i,
             )
+
+        if i % train_args.save_every == 0 and i > 0:
+            print("saving model...")
+            pipeline.unet.save_pretrained("./out/")
+            lora_state_dict = get_peft_model_state_dict(pipeline.unet)
+            StableDiffusionPipeline.save_lora_weights(os.path.join("./out/", "unet_lora/"), lora_state_dict)
 
 
     pipeline.unet.save_pretrained("./out/")

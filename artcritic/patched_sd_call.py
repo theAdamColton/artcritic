@@ -1,7 +1,6 @@
 from torch.utils import checkpoint
 from diffusers import StableDiffusionPipeline
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
-from diffusers.pipelines.latent_consistency_models import LatentConsistencyModelPipeline
 from diffusers.utils import deprecate
 from typing import Union, List, Optional, Callable, Dict, Any
 import torch

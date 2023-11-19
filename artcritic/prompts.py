@@ -1,6 +1,17 @@
 import datasets
 import random
 
+class DiffusionDB:
+    def __init__(self, seed=42, split="train"):
+        self.ds = datasets.load_dataset("poloclub/diffusiondb", "2m_text_only", split="train").shuffle(seed=seed)
+        if split=='train':
+            self.ds = self.ds.train_test_split(test_size = 0.05)['train']
+        elif split == 'test':
+            self.ds = self.ds.train_test_split(test_size = 0.05)['test']
+        self.iter = iter(self.ds)
+
+    def __call__(self):
+        return next(self.iter)
 
 class DiffusionDBPromptQA:
     def __init__(self, seed=42, split="train"):
