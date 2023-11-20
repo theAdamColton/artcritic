@@ -162,15 +162,12 @@ def main(
 ):
 
     do_accum = train_args.accum_freq > 1
-    if do_accum:
-        assert train_args.gradient_accumulation_steps == 1
-
 
     generator = torch.Generator().manual_seed(train_args.seed)
 
     config_d = {"train_" + k: v for k, v in asdict(train_args).items()}
     config_d.update({"model_" + k: v for k, v in asdict(model_args).items()})
-    run = wandb.init(project='artcritic', config = config_d)
+    wandb.init(project='artcritic', config = config_d)
 
     print(f"\n{config_d}")
 
@@ -218,7 +215,7 @@ def main(
     print("UNET  ", end="")
     pipeline.unet.print_trainable_parameters()
 
-    pipeline = pipeline.to(inference_dtype).to(train_args.device)
+    pipeline = pipeline.to(train_args.device)
 
     adam_args = dict(
         params=pipeline.unet.parameters(),
@@ -235,10 +232,6 @@ def main(
         optimizer = bnb.optim.Adam8bit(**adam_args)
     else:
         optimizer = torch.optim.AdamW(**adam_args)
-
-    accelerator = Accelerator(mixed_precision=train_args.precision, gradient_accumulation_steps=train_args.gradient_accumulation_steps)
-    pipeline.unet, optimizer = accelerator.prepare(pipeline.unet, optimizer)
-
 
     train_prompter = DiffusionDB(seed=train_args.seed, split="train")
     eval_prompter = DiffusionDB(seed=train_args.seed + 1, split="test")
@@ -269,6 +262,14 @@ def main(
     else:
         raise NotImplementedError
 
+    accelerator = Accelerator(mixed_precision=train_args.precision, gradient_accumulation_steps=train_args.gradient_accumulation_steps)
+
+    pipeline = pipeline.to(accelerator.device).to(inference_dtype)
+    pipeline.unet = pipeline.unet.float()
+
+    pipeline.unet, optimizer = accelerator.prepare(pipeline.unet, optimizer)
+
+
     first_epoch = 0
 
     losses_to_log = 0.0
@@ -296,30 +297,7 @@ def main(
 
         with accelerator.accumulate(pipeline.unet):
             if train_args.accum_freq == 1:
-                ims = patched_call(
-                    pipeline,
-                    train_prompts,
-                    output_type="pt",
-                    guidance_scale=model_args.sd_guidance_scale,
-                    num_inference_steps=model_args.model_steps,
-                    use_gradient_checkpointing=train_args.grad_checkpoint,
-                    generator=generator,
-                    height = train_args.image_height,
-                    width = train_args.image_width,
-                ).images
-                loss, reward = rewarder(ims, train_prompt_batch)
-                (loss/train_args.gradient_accumulation_steps).backward()
-
-                optimizer.step()
-                optimizer.zero_grad()
-
-                losses_to_log += loss.item()
-
-                print(f"loss {loss.item():.4f}")
-
-            else:
-                # First, cache the features without any gradient tracking.
-                with torch.no_grad():
+                with accelerator.autocast():
                     ims = patched_call(
                         pipeline,
                         train_prompts,
@@ -331,7 +309,33 @@ def main(
                         height = train_args.image_height,
                         width = train_args.image_width,
                     ).images
-                    im_embeds, text_embeds = rewarder.get_embeds(ims, train_prompt_batch)
+                    loss, reward = rewarder(ims, train_prompt_batch)
+                accelerator.backward(loss)
+
+                accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+                losses_to_log += loss.item()
+
+                print(f"loss {loss.item():.4f}")
+
+            else:
+                # First, cache the features without any gradient tracking.
+                with torch.no_grad():
+                    with accelerator.autocast():
+                        ims = patched_call(
+                            pipeline,
+                            train_prompts,
+                            output_type="pt",
+                            guidance_scale=model_args.sd_guidance_scale,
+                            num_inference_steps=model_args.model_steps,
+                            use_gradient_checkpointing=train_args.grad_checkpoint,
+                            generator=generator,
+                            height = train_args.image_height,
+                            width = train_args.image_width,
+                        ).images
+                        im_embeds, text_embeds = rewarder.get_embeds(ims, train_prompt_batch)
                 accum_image_emb.append(im_embeds)
                 accum_text_emb.append(text_embeds)
                 accum_texts.append(train_prompts)
@@ -345,19 +349,20 @@ def main(
                     print("taking loss on accum batch")
                     for j in range(train_args.accum_freq):
                         curr_texts = accum_texts[j][:train_args.batch_size]
-                        ims = patched_call(
-                            pipeline,
-                            curr_texts,
-                            output_type="pt",
-                            guidance_scale=model_args.sd_guidance_scale,
-                            num_inference_steps=model_args.model_steps,
-                            use_gradient_checkpointing=train_args.grad_checkpoint,
-                            generator=generator,
-                            height = train_args.image_height,
-                            width = train_args.image_width,
-                        ).images
+                        with accelerator.autocast():
+                            ims = patched_call(
+                                pipeline,
+                                curr_texts,
+                                output_type="pt",
+                                guidance_scale=model_args.sd_guidance_scale,
+                                num_inference_steps=model_args.model_steps,
+                                use_gradient_checkpointing=train_args.grad_checkpoint,
+                                generator=generator,
+                                height = train_args.image_height,
+                                width = train_args.image_width,
+                            ).images
 
-                        im_embeds, text_embeds = rewarder.get_embeds(ims, train_prompt_batch[:train_args.batch_size])
+                            im_embeds, text_embeds = rewarder.get_embeds(ims, train_prompt_batch[:train_args.batch_size])
 
                         assert train_args.batch_size < train_args.accum_batch_size
 
@@ -366,12 +371,13 @@ def main(
 
                         loss = rewarder.get_loss(im_embeds, text_embeds)
                         reward = -loss
-                        (loss / train_args.accum_freq).backward()
+                        accelerator.backward(loss / train_args.accum_freq)
                         losses_to_log += loss.item()
 
                     accum_texts, accum_image_emb, accum_text_emb = [], [], []
                     print("done taking loss on accum batch")
 
+                    accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
                     optimizer.step()
                     optimizer.zero_grad()
 
@@ -410,15 +416,16 @@ def main(
             with torch.inference_mode():
                 eval_generator = torch.Generator().manual_seed(420)
                 pipeline.unet.eval()
-                ims = patched_call(
-                    pipeline,
-                    eval_prompts,
-                    output_type="pt",
-                    guidance_scale=model_args.sd_guidance_scale,
-                    num_inference_steps=model_args.model_steps,
-                    generator=eval_generator,
-                ).images
-                loss, reward = rewarder(ims, eval_prompt_batch)
+                with accelerator.autocast():
+                    ims = patched_call(
+                        pipeline,
+                        eval_prompts,
+                        output_type="pt",
+                        guidance_scale=model_args.sd_guidance_scale,
+                        num_inference_steps=model_args.model_steps,
+                        generator=eval_generator,
+                    ).images
+                    loss, reward = rewarder(ims, eval_prompt_batch)
                 pipeline.unet.train()
             train_images = []
             for j, image in enumerate(ims):

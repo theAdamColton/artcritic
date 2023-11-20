@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch import nn
 import torchvision
 from transformers import CLIPModel, CLIPProcessor
 from transformers.models.clip.modeling_clip import clip_loss
@@ -8,8 +9,9 @@ from peft import PeftModel
 from datasets import load_dataset
 
 
-class CFNReward(Reward):
+class CFNReward(nn.Module):
     def __init__(self, inference_dtype=None, device=None, peft_model_url = "adams-story/cfn-dalle3", base_model_name = "openai/clip-vit-base-patch32"):
+        super().__init__()
         print("loading cfn clip")
         model = CLIPModel.from_pretrained(base_model_name)
         if peft_model_url:
@@ -57,7 +59,7 @@ class CFNReward(Reward):
         image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
         return image_embeds, text_embeds
 
-    def __call__(self, im_pix, batched_prompt_d):
+    def forward(self, im_pix, batched_prompt_d):
         image_embeds, text_embeds = self.get_embeds(im_pix, batched_prompt_d)
         loss = self.get_loss(image_embeds, text_embeds)
         return loss, -loss
