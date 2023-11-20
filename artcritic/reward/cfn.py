@@ -44,15 +44,11 @@ class CFNReward(nn.Module):
         prompts = [ d['prompt'] for d in batched_prompt_d]
 
         with torch.no_grad():
-            def _emb_prompts(prompts):
-                text_inputs = self.processor(
-                    text=prompts, return_tensors="pt", padding=True, truncation=True, max_length=77
-                )
-                text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
-                text_embeds = self.model.get_text_features(**text_inputs)
-                text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
-                return text_embeds
-            text_embeds = _emb_prompts(prompts)
+            text_inputs = self.processor(
+                text=prompts, return_tensors="pt", padding=True, truncation=True, max_length=77
+            )
+            text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
+            text_embeds = self.model.get_text_features(**text_inputs)
             text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
 
         image_embeds = self.model.get_image_features(x_var)

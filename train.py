@@ -32,6 +32,7 @@ from artcritic.reward.hps import HPSReward
 class TrainingArgs:
     reward_type: str = "llava"
 
+    use_mixed_precision: bool = True
     precision: str = "fp16"
     device:str = "cuda"
     seed: int = 42
@@ -262,10 +263,16 @@ def main(
     else:
         raise NotImplementedError
 
-    accelerator = Accelerator(mixed_precision=train_args.precision, gradient_accumulation_steps=train_args.gradient_accumulation_steps)
+    if train_args.use_mixed_precision:
+        _acc_precision = train_args.precision
+    else:
+        _acc_precision = "no"
+
+    accelerator = Accelerator(mixed_precision=_acc_precision, gradient_accumulation_steps=train_args.gradient_accumulation_steps)
 
     pipeline = pipeline.to(accelerator.device).to(inference_dtype)
-    pipeline.unet = pipeline.unet.float()
+    if train_args.use_mixed_precision:
+        pipeline.unet = pipeline.unet.float()
 
     pipeline.unet, optimizer = accelerator.prepare(pipeline.unet, optimizer)
 
@@ -312,7 +319,8 @@ def main(
                     loss, reward = rewarder(ims, train_prompt_batch)
                 accelerator.backward(loss)
 
-                accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -377,7 +385,8 @@ def main(
                     accum_texts, accum_image_emb, accum_text_emb = [], [], []
                     print("done taking loss on accum batch")
 
-                    accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
                     optimizer.step()
                     optimizer.zero_grad()
 
