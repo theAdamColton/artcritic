@@ -303,7 +303,7 @@ def main(
         train_prompts = [x["prompt"] for x in train_prompt_batch]
 
         with accelerator.accumulate(pipeline.unet):
-            if train_args.accum_freq == 1:
+            if not do_accum:
                 with accelerator.autocast():
                     ims = patched_call(
                         pipeline,
@@ -353,7 +353,6 @@ def main(
                     # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
                     # Call backwards each time, but only step optimizer at the end.
 
-
                     print("taking loss on accum batch")
                     for j in range(train_args.accum_freq):
                         curr_texts = accum_texts[j][:train_args.batch_size]
@@ -370,14 +369,15 @@ def main(
                                 width = train_args.image_width,
                             ).images
 
-                            im_embeds, text_embeds = rewarder.get_embeds(ims, train_prompt_batch[:train_args.batch_size])
+                            im_embeds, text_embeds = rewarder.get_embeds(ims, [{'prompt': x} for x in curr_texts])
 
                         assert train_args.batch_size < train_args.accum_batch_size
 
-                        im_embeds = torch.cat(accum_image_emb[:j] + [im_embeds] + [accum_image_emb[j][train_args.batch_size:]] + accum_image_emb[j+1:])
-                        text_embeds = torch.cat(accum_text_emb[:j] + [text_embeds] + [accum_text_emb[j][train_args.batch_size:]] + accum_text_emb[j+1:])
+                        all_im_embeds = torch.cat(accum_image_emb[:j] + [im_embeds] + [accum_image_emb[j][train_args.batch_size:]] + accum_image_emb[j+1:])
+                        all_text_embeds = torch.cat(accum_text_emb[:j] + [text_embeds] + [accum_text_emb[j][train_args.batch_size:]] + accum_text_emb[j+1:])
 
-                        loss = rewarder.get_loss(im_embeds, text_embeds)
+                        loss = rewarder.get_loss(all_im_embeds, all_text_embeds)
+                        print(f"loss {loss.item():.4f}")
                         reward = -loss
                         accelerator.backward(loss / train_args.accum_freq)
                         losses_to_log += loss.item()

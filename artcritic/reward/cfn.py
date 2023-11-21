@@ -62,6 +62,6 @@ class CFNReward(nn.Module):
 
     def get_loss(self, image_embeds, text_embeds):
         # contrastive clip reward score
-        loss = clip_loss(text_embeds @ image_embeds.T * self.model.logit_scale)
+        loss = clip_loss((text_embeds @ image_embeds.T) * self.model.logit_scale.exp())
         return loss
 
