@@ -38,7 +38,7 @@ class CFNReward(nn.Module):
     def get_embeds(self, im_pix, batched_prompt_d):
         to_h = self.processor.image_processor.crop_size['height']
         to_w = self.processor.image_processor.crop_size['width']
-        x_var = F.interpolate(im_pix, (to_h, to_w), antialias=True, mode="bilinear")
+        x_var = F.interpolate(im_pix, (to_h, to_w), antialias=False, mode="nearest")
         x_var = self.normalize(x_var).to(im_pix.dtype)
 
         prompts = [ d['prompt'] for d in batched_prompt_d]
