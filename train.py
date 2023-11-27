@@ -295,8 +295,8 @@ def main(
     accum_text_emb = []
 
     #################### TRAINING ####################
-    with accelerator.accumulate(pipeline.unet):
-        for i in tqdm(range(first_epoch, train_args.max_n_batches)):
+    for i in tqdm(range(first_epoch, train_args.max_n_batches)):
+        with accelerator.accumulate(pipeline.unet):
             # uses accum_batch_size
             if do_accum:
                 train_prompt_batch = [train_prompter() for _ in range(train_args.accum_batch_size)]
@@ -395,72 +395,74 @@ def main(
                     lr_scheduler.step()
 
 
-            if (i + 1) % train_args.log_images_every == 0:
-                train_images = []
-                for j, image in enumerate(ims):
-                    image = image.clamp(0, 1).cpu().detach()
-                    pil = torchvision.transforms.ToPILImage()(image)
-                    train_images.append(
-                        wandb.Image(
-                            pil,
-                            caption=f"{train_prompt_batch[j]['prompt']} | {reward.item():.2f}",
-                        )
-                    )
 
-                wandb.log(
-                    {
-                        "train": {
-                            "images": train_images,
-                            "loss": losses_to_log / train_args.log_images_every,
-                        }
-                    },
-                    step=i,
+        if (i + 1) % train_args.log_images_every == 0:
+            ims = ims[:train_args.batch_size]
+            train_images = []
+            for j, image in enumerate(ims):
+                image = image.clamp(0, 1).cpu().detach()
+                pil = torchvision.transforms.ToPILImage()(image)
+                train_images.append(
+                    wandb.Image(
+                        pil,
+                        caption=f"{train_prompt_batch[j]['prompt']} | {reward.item():.2f}",
+                    )
                 )
 
-                losses_to_log = 0.0
+            wandb.log(
+                {
+                    "train": {
+                        "images": train_images,
+                        "loss": losses_to_log / train_args.log_images_every,
+                    }
+                },
+                step=i,
+            )
 
-            if (
-                ((i + 1) % train_args.eval_every == 0)
-                or (i == 0)
-                or (i == train_args.max_n_batches - 1)
-            ):
-                print("running eval...")
+            losses_to_log = 0.0
 
-                with torch.inference_mode():
-                    eval_generator = torch.Generator().manual_seed(420)
-                    pipeline.unet.eval()
-                    with accelerator.autocast():
-                        ims = patched_call(
-                            pipeline,
-                            eval_prompts,
-                            output_type="pt",
-                            guidance_scale=model_args.sd_guidance_scale,
-                            num_inference_steps=model_args.model_steps,
-                            generator=eval_generator,
-                        ).images
-                        loss, reward = rewarder(ims, eval_prompt_batch)
-                    pipeline.unet.train()
-                train_images = []
-                for j, image in enumerate(ims):
-                    image = image.clamp(0, 1).cpu().detach()
-                    pil = torchvision.transforms.ToPILImage()(image)
-                    train_images.append(
-                        wandb.Image(
-                            pil,
-                            caption=f"{eval_prompt_batch[j]['prompt']} | {reward.item():.2f}",
-                        )
+        if (
+            ((i + 1) % train_args.eval_every == 0)
+            or (i == 0)
+            or (i == train_args.max_n_batches - 1)
+        ):
+            print("running eval...")
+
+            with torch.inference_mode():
+                eval_generator = torch.Generator().manual_seed(420)
+                pipeline.unet.eval()
+                with accelerator.autocast():
+                    ims = patched_call(
+                        pipeline,
+                        eval_prompts,
+                        output_type="pt",
+                        guidance_scale=model_args.sd_guidance_scale,
+                        num_inference_steps=model_args.model_steps,
+                        generator=eval_generator,
+                    ).images
+                    loss, reward = rewarder(ims, eval_prompt_batch)
+                pipeline.unet.train()
+            train_images = []
+            for j, image in enumerate(ims):
+                image = image.clamp(0, 1).cpu().detach()
+                pil = torchvision.transforms.ToPILImage()(image)
+                train_images.append(
+                    wandb.Image(
+                        pil,
+                        caption=f"{eval_prompt_batch[j]['prompt']} | {reward.item():.2f}",
                     )
-
-                wandb.log(
-                    {"test": {"images": train_images, "loss": loss}},
-                    step=i,
                 )
 
-            if i % train_args.save_every == 0 and i > 0:
-                print("saving model...")
-                pipeline.unet.save_pretrained("./out/")
-                lora_state_dict = get_peft_model_state_dict(pipeline.unet)
-                StableDiffusionPipeline.save_lora_weights(os.path.join("./out/", "unet_lora/"), lora_state_dict)
+            wandb.log(
+                {"test": {"images": train_images, "loss": loss}},
+                step=i,
+            )
+
+        if i % train_args.save_every == 0 and i > 0:
+            print("saving model...")
+            pipeline.unet.save_pretrained("./out/")
+            lora_state_dict = get_peft_model_state_dict(pipeline.unet)
+            StableDiffusionPipeline.save_lora_weights(os.path.join("./out/", "unet_lora/"), lora_state_dict)
 
 
     pipeline.unet.save_pretrained("./out/")
