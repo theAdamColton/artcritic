@@ -1,3 +1,4 @@
+import numpy as np
 import os
 from typing import Optional, Tuple
 from diffusers.pipelines.latent_consistency_models import LatentConsistencyModelPipeline
@@ -286,7 +287,7 @@ def main(
 
     first_epoch = 0
 
-    losses_to_log = 0.0
+    losses_to_log = []
 
     pipeline.unet.train()
 
@@ -338,7 +339,7 @@ def main(
                 optimizer.zero_grad()
                 lr_scheduler.step()
 
-                losses_to_log += loss.item()
+                losses_to_log.append(loss.item())
 
                 print(f"loss {loss.item():.4E}")
 
@@ -400,14 +401,14 @@ def main(
                                 im_embeds, text_embeds = rewarder.get_embeds(ims, [{'prompt': x} for x in curr_texts])
 
                                 past_accum_im_embeds = accum_image_emb[:j]
-                                future_accum_im_embeds = accum_image_emb[j:]
+                                future_accum_im_embeds = accum_image_emb[j+1:]
                                 mini_past_im_embeds = accum_image_emb[j][:start_i]
                                 mini_future_im_embeds = accum_image_emb[j][end_i:]
 
                                 all_im_embeds = torch.cat(past_accum_im_embeds + [mini_past_im_embeds] + [im_embeds] + [mini_future_im_embeds] + future_accum_im_embeds)
 
                                 past_accum_txt_embeds = accum_text_emb[:j]
-                                future_accum_txt_embeds = accum_text_emb[j:]
+                                future_accum_txt_embeds = accum_text_emb[j+1:]
                                 mini_past_txt_embeds = accum_text_emb[j][:start_i]
                                 mini_future_txt_embeds = accum_text_emb[j][end_i:]
                                 all_text_embeds = torch.cat(past_accum_txt_embeds + [mini_past_txt_embeds] + [text_embeds] + [mini_future_txt_embeds] + future_accum_txt_embeds)
@@ -416,8 +417,8 @@ def main(
                             print(f"accum loss {loss.item():.4f}")
                             reward = -loss
                             # hopefully doesn't underflow with all the division
-                            accelerator.backward(loss / (train_args.accum_freq + n_minibatches))
-                            losses_to_log += loss.item() / (train_args.accum_freq + n_minibatches)
+                            accelerator.backward(loss / (train_args.accum_freq * n_minibatches))
+                            losses_to_log.append(loss.item())
 
                     accum_texts, accum_image_emb, accum_text_emb = [], [], []
                     print("done taking loss on accum batch")
@@ -431,7 +432,6 @@ def main(
 
 
         if (i + 1) % train_args.log_images_every == 0:
-            ims = ims[:train_args.batch_size]
             train_images = []
             for j, image in enumerate(ims):
                 image = image.clamp(0, 1).cpu().detach()
@@ -439,7 +439,7 @@ def main(
                 train_images.append(
                     wandb.Image(
                         pil,
-                        caption=f"{train_prompt_batch[j]['prompt']} | {reward.item():.2f}",
+                        caption=f"{curr_texts[j]} | {reward.item():.2f}",
                     )
                 )
 
@@ -447,13 +447,13 @@ def main(
                 {
                     "train": {
                         "images": train_images,
-                        "loss": losses_to_log / train_args.log_images_every,
+                        "loss": np.array(losses_to_log).mean(),
                     }
                 },
                 step=i,
             )
 
-            losses_to_log = 0.0
+            losses_to_log = []
 
         if (
             ((i + 1) % train_args.eval_every == 0)
@@ -463,7 +463,8 @@ def main(
             print("running eval...")
 
             with torch.inference_mode():
-                eval_generator = torch.Generator().manual_seed(420)
+                eval_generator = torch.Generator(device=accelerator.device).manual_seed(420)
+                randn_latents = torch.randn((train_args.accum_batch_size, num_channels_latents, train_args.image_height//pipeline.vae_scale_factor, train_args.image_width // pipeline.vae_scale_factor), device=accelerator.device, dtype=inference_dtype, generator=eval_generator)
                 pipeline.unet.eval()
                 with accelerator.autocast():
                     ims = patched_call(
@@ -472,7 +473,7 @@ def main(
                         output_type="pt",
                         guidance_scale=model_args.sd_guidance_scale,
                         num_inference_steps=model_args.model_steps,
-                        generator=eval_generator,
+                        latents = randn_latents,
                     ).images
                     loss, reward = rewarder(ims, eval_prompt_batch)
                 pipeline.unet.train()
