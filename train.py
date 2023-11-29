@@ -17,6 +17,8 @@ from diffusers import (
     LCMScheduler,
     AutoencoderKL,
 )
+from diffusers.models.attention_processor import LoRAAttnProcessor2_0 as LoRAAttnProcessor
+from diffusers.loaders.utils import AttnProcsLayers
 from artcritic.patched_lcm_call import lcm_patched_call
 from artcritic.patched_sd_call import sd_patched_call
 from artcritic import patched_sdxl_call
@@ -71,7 +73,7 @@ class TrainingArgs:
 
     log_images_every: int = 8
 
-    save_every: int = 1000
+    save_every: int = 500
 
     eval_every: int = 8
 
@@ -116,12 +118,12 @@ class ModelArgs:
             vae = AutoencoderKL.from_pretrained(model_args.vae_model_name_or_url)
             pipeline.vae = vae
 
-        if model_args.adapter_name_or_url is not None:
+        if model_args.adapter_name_or_url:
             pipeline.load_lora_weights(model_args.adapter_name_or_url)
             pipeline.fuse_lora()
             pipeline.unload_lora_weights()
 
-        if model_args.adapter_name_or_url_2 is not None:
+        if model_args.adapter_name_or_url_2:
             pipeline.load_lora_weights(model_args.adapter_name_or_url_2)
             pipeline.fuse_lora()
 
@@ -203,22 +205,25 @@ def main(
             "proj_out",
             "ff.net.0.proj",
             "ff.net.2",
-            "conv1",
-            "conv2",
-            "conv_shortcut",
-            "downsamplers.0.conv",
-            "upsamplers.0.conv",
+            #"conv1",
+            #"conv2",
+            #"conv_shortcut",
+            #"downsamplers.0.conv",
+            #"upsamplers.0.conv",
             "time_emb_proj",
         ],
     )
     pipeline.unet = get_peft_model(pipeline.unet, lora_config)
+    lora_parameters = [p for p in pipeline.unet.parameters() if p.requires_grad]
+
     print("UNET  ", end="")
+
     pipeline.unet.print_trainable_parameters()
 
     pipeline = pipeline.to(train_args.device)
 
     adam_args = dict(
-        params=pipeline.unet.parameters(),
+        params=lora_parameters,
         lr=train_args.learning_rate,
         betas=(train_args.adam_beta1, train_args.adam_beta2),
         weight_decay=train_args.adam_weight_decay,
@@ -317,18 +322,19 @@ def main(
                         height = train_args.image_height,
                         width = train_args.image_width,
                     ).images
+                    ims = ims.to(inference_dtype)
                     loss, reward = rewarder(ims, train_prompt_batch)
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
+                    accelerator.clip_grad_norm_(lora_parameters, 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 lr_scheduler.step()
 
                 losses_to_log += loss.item()
 
-                print(f"loss {loss.item():.4f}")
+                print(f"loss {loss.item():.4E}")
 
             else:
                 # First, cache the features without any gradient tracking.
@@ -345,6 +351,7 @@ def main(
                             height = train_args.image_height,
                             width = train_args.image_width,
                         ).images
+                        ims = ims.to(inference_dtype)
                         im_embeds, text_embeds = rewarder.get_embeds(ims, train_prompt_batch)
                 accum_image_emb.append(im_embeds)
                 accum_text_emb.append(text_embeds)
@@ -388,7 +395,7 @@ def main(
                     print("done taking loss on accum batch")
 
                     if accelerator.sync_gradients:
-                        accelerator.clip_grad_norm_(pipeline.unet.parameters(), 1.0)
+                        accelerator.clip_grad_norm_(lora_parameters, 1.0)
                     optimizer.step()
                     optimizer.zero_grad()
                     lr_scheduler.step()
