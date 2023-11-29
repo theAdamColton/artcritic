@@ -24,7 +24,6 @@ from artcritic import patched_sdxl_call
 from artcritic.prompts import DiffusionDBPromptQA, DiffusionDB
 from artcritic.reward.cfn import CFNReward
 from artcritic.reward.dummy import DummyReward
-from artcritic.reward.hps import HPSReward
 
 
 
