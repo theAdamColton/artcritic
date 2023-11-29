@@ -165,10 +165,11 @@ def main(
 
     do_accum = train_args.accum_freq > 1
 
-    generator = torch.Generator().manual_seed(train_args.seed)
+    assert train_args.log_images_every % train_args.accum_freq == 0
 
     config_d = {"train_" + k: v for k, v in asdict(train_args).items()}
     config_d.update({"model_" + k: v for k, v in asdict(model_args).items()})
+
     wandb.init(project='artcritic', config = config_d)
 
     print(f"\n{config_d}")
@@ -297,6 +298,11 @@ def main(
     accum_texts = []
     accum_image_emb = []
     accum_text_emb = []
+    accum_randn_noise = []
+
+    num_channels_latents = pipeline.unet.config.in_channels
+
+    generator = torch.Generator(device=accelerator.device).manual_seed(train_args.seed)
 
     #################### TRAINING ####################
     for i in tqdm(range(first_epoch, train_args.max_n_batches)):
@@ -338,6 +344,10 @@ def main(
 
             else:
                 # First, cache the features without any gradient tracking.
+                # TODO this only works for CFG == 0
+                randn_latents = torch.randn((train_args.accum_batch_size, num_channels_latents, train_args.image_height//pipeline.vae_scale_factor, train_args.image_width // pipeline.vae_scale_factor), device=accelerator.device, dtype=inference_dtype, generator=generator)
+                accum_randn_noise.append(randn_latents)
+
                 with torch.no_grad():
                     with accelerator.autocast():
                         ims = patched_call(
@@ -347,7 +357,7 @@ def main(
                             guidance_scale=model_args.sd_guidance_scale,
                             num_inference_steps=model_args.model_steps,
                             use_gradient_checkpointing=train_args.grad_checkpoint,
-                            generator=generator,
+                            latents=randn_latents,
                             height = train_args.image_height,
                             width = train_args.image_width,
                         ).images
@@ -364,32 +374,50 @@ def main(
 
                     print("taking loss on accum batch")
                     for j in range(train_args.accum_freq):
-                        curr_texts = accum_texts[j][:train_args.batch_size]
-                        with accelerator.autocast():
-                            ims = patched_call(
-                                pipeline,
-                                curr_texts,
-                                output_type="pt",
-                                guidance_scale=model_args.sd_guidance_scale,
-                                num_inference_steps=model_args.model_steps,
-                                use_gradient_checkpointing=train_args.grad_checkpoint,
-                                generator=generator,
-                                height = train_args.image_height,
-                                width = train_args.image_width,
-                            ).images
 
-                            im_embeds, text_embeds = rewarder.get_embeds(ims, [{'prompt': x} for x in curr_texts])
+                        n_minibatches = len(accum_texts[j]) // train_args.batch_size
 
-                        assert train_args.batch_size < train_args.accum_batch_size
+                        for k in range(n_minibatches):
+                            start_i = k * train_args.batch_size
+                            end_i = (k+1) * train_args.batch_size
 
-                        all_im_embeds = torch.cat(accum_image_emb[:j] + [im_embeds] + [accum_image_emb[j][train_args.batch_size:]] + accum_image_emb[j+1:])
-                        all_text_embeds = torch.cat(accum_text_emb[:j] + [text_embeds] + [accum_text_emb[j][train_args.batch_size:]] + accum_text_emb[j+1:])
+                            curr_texts = accum_texts[j][start_i:end_i]
+                            curr_latents = accum_randn_noise[j][start_i:end_i]
 
-                        loss = rewarder.get_loss(all_im_embeds, all_text_embeds)
-                        print(f"loss {loss.item():.4f}")
-                        reward = -loss
-                        accelerator.backward(loss / train_args.accum_freq)
-                        losses_to_log += loss.item() / train_args.accum_freq
+                            with accelerator.autocast():
+                                ims = patched_call(
+                                    pipeline,
+                                    curr_texts,
+                                    latents=curr_latents,
+                                    output_type="pt",
+                                    guidance_scale=model_args.sd_guidance_scale,
+                                    num_inference_steps=model_args.model_steps,
+                                    use_gradient_checkpointing=train_args.grad_checkpoint,
+                                    height = train_args.image_height,
+                                    width = train_args.image_width,
+                                ).images
+
+                                im_embeds, text_embeds = rewarder.get_embeds(ims, [{'prompt': x} for x in curr_texts])
+
+                                past_accum_im_embeds = accum_image_emb[:j]
+                                future_accum_im_embeds = accum_image_emb[j:]
+                                mini_past_im_embeds = accum_image_emb[j][:start_i]
+                                mini_future_im_embeds = accum_image_emb[j][end_i:]
+
+                                all_im_embeds = torch.cat(past_accum_im_embeds + [mini_past_im_embeds] + [im_embeds] + [mini_future_im_embeds] + future_accum_im_embeds)
+
+                                past_accum_txt_embeds = accum_text_emb[:j]
+                                future_accum_txt_embeds = accum_text_emb[j:]
+                                mini_past_txt_embeds = accum_text_emb[j][:start_i]
+                                mini_future_txt_embeds = accum_text_emb[j][end_i:]
+                                all_text_embeds = torch.cat(past_accum_txt_embeds + [mini_past_txt_embeds] + [text_embeds] + [mini_future_txt_embeds] + future_accum_txt_embeds)
+
+                            loss = rewarder.get_loss(all_im_embeds, all_text_embeds)
+                            print(f"accum loss {loss.item():.4f}")
+                            reward = -loss
+                            # hopefully doesn't underflow with all the division
+                            accelerator.backward(loss / (train_args.accum_freq + n_minibatches))
+                            losses_to_log += loss.item() / (train_args.accum_freq + n_minibatches)
 
                     accum_texts, accum_image_emb, accum_text_emb = [], [], []
                     print("done taking loss on accum batch")
